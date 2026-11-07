@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>مستشفى الـ يوسف — نظام إدارة المستشفيات</title>
-<!-- V11.2: إصلاحات واجهة إضافية فوق V11.1 — انظر تقرير التنفيذ -->
+<!-- V11.2 + Cloud Bridge Stage 1: dual identity and credential-safe manual sync -->
 <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -1626,6 +1626,7 @@ tr.overdue{background:var(--danger-soft)!important}
           <button class="page-tab" data-stab="users" onclick="setSettingsTab('users')" data-perm="settings.users">👤 المستخدمين</button>
           <button class="page-tab" data-stab="payers" onclick="setSettingsTab('payers')" data-perm="settings.hospital">🏦 شركات التأمين</button>
           <button class="page-tab" data-stab="backup" onclick="setSettingsTab('backup')" data-perm="settings.backup">💾 النسخ</button>
+          <button class="page-tab" data-stab="cloud" onclick="setSettingsTab('cloud')" data-perm="settings.hospital">☁️ المزامنة السحابية</button>
           <button class="page-tab" data-stab="audit" onclick="setSettingsTab('audit')" data-perm="settings.audit">📋 السجل</button>
           <button class="page-tab" data-stab="review" onclick="setSettingsTab('review')" data-perm="settings.audit">🔎 المراجعة <span id="review-badge"></span></button>
         </div>
@@ -1741,6 +1742,44 @@ tr.overdue{background:var(--danger-soft)!important}
               <button class="btn ghost" style="justify-content:center" onclick="document.getElementById('import-file').click()">⬆️ استيراد نسخة</button>
               <input type="file" id="import-file" accept=".json" style="display:none" onchange="importBackup(this)">
             </div>
+          </div>
+        </div>
+        <div id="set-cloud" style="display:none">
+          <div class="card">
+            <h3>☁️ ربط قاعدة بيانات المستشفى</h3>
+            <div class="alert info"><span class="ic">🔐</span><div>تسجيل الدخول هنا منفصل تماماً عن حسابات موظفي التطبيق. استخدم حساب Supabase Auth المصرّح له في قاعدة البيانات. كلمة المرور لا تُحفظ داخل التطبيق.</div></div>
+            <div class="form-grid">
+              <div class="field"><label>Project URL</label><input id="cloud-url" type="url" placeholder="https://xxxx.supabase.co" autocomplete="url"></div>
+              <div class="field"><label>Publishable key / anon key</label><input id="cloud-key" type="password" autocomplete="off" placeholder="sb_publishable_..."></div>
+              <div class="field"><label>بريد حساب Supabase</label><input id="cloud-email" type="email" autocomplete="username"></div>
+              <div class="field"><label>كلمة مرور Supabase</label><input id="cloud-password" type="password" autocomplete="current-password"></div>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn primary" onclick="cloudSaveConfig()">💾 حفظ إعداد الاتصال</button>
+              <button class="btn success" onclick="cloudLogin()">🔑 تسجيل الدخول إلى Supabase</button>
+              <button class="btn ghost" onclick="cloudLogout()">تسجيل الخروج السحابي</button>
+            </div>
+            <p class="sub" style="margin-top:10px">المفتاح العام فقط مسموح داخل HTML. ممنوع وضع Secret key أو service_role هنا أو في GitHub.</p>
+          </div>
+          <div class="card">
+            <h3>🔄 مزامنة بيانات المستشفى</h3>
+            <div id="cloud-status" class="alert warn"><span class="ic">ℹ️</span><div>لم يتم التحقق من اتصال Supabase بعد.</div></div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+              <button class="btn" onclick="cloudCheck()">اختبار الاتصال والصلاحية</button>
+              <button class="btn primary" onclick="cloudPull()">⬇️ جلب بيانات السحابة</button>
+              <button class="btn success" onclick="cloudPush()">⬆️ رفع بيانات هذا الجهاز</button>
+            </div>
+            <div class="alert warn"><span class="ic">⚠️</span><div><b>المزامنة في هذه المرحلة يدوية وبنسخة كاملة.</b> قبل الجلب يتم تنزيل نسخة احتياطية محلية. التعارض يمنع الكتابة فوق تحديث جهاز آخر. لا يوجد دمج تلقائي لتعديلات السجلات المتزامنة.</div></div>
+            <div class="sub" id="cloud-revision">رقم مراجعة السحابة على هذا الجهاز: 0</div>
+          </div>
+          <div class="card">
+            <h3>🛡️ حماية حسابات الموظفين</h3>
+            <ul style="padding-inline-start:22px;line-height:2;color:var(--text-secondary);font-size:12.5px;font-weight:600">
+              <li>حسابات التطبيق الداخلية تظل مستقلة عن Supabase Auth.</li>
+              <li>كلمات مرور الموظفين وبصماتها وملح التشفير لا تُرسل إلى السحابة.</li>
+              <li>بيانات الموظفين وصلاحياتهم الوظيفية تُنقل دون بيانات اعتماد. الحساب الجديد على جهاز آخر يحتاج تعيين كلمة مرور محلية وتفعيلًا من المدير.</li>
+              <li>جلسة Supabase تحفظ في علامة التبويب الحالية فقط، ولا يتم حفظ كلمة المرور.</li>
+            </ul>
           </div>
         </div>
         <div id="set-review" style="display:none">
@@ -4465,8 +4504,8 @@ let body='';
 if(id==='med'){const used={};state.prescriptions.filter(rx=>rx.status==='dispensed').forEach(rx=>rx.items.forEach(it=>{used[it.medicineName]=(used[it.medicineName]||0)+it.qty;}));const s=Object.entries(used).sort((x,y)=>y[1]-x[1]).slice(0,15);body=s.length?'<div class="table-wrap"><table><thead><tr><th>الدواء</th><th>الكمية المصروفة</th></tr></thead><tbody>'+s.map(([n,q])=>`<tr><td class="cell-name">${esc(n)}</td><td>${q}</td></tr>`).join('')+'</tbody></table></div>':'<div class="empty"><p>لا أدوية مصروفة بعد</p></div>';}
 else if(id==='ins'){const by={};state.invoices.forEach(inv=>{if(!(inv.ins>0)) return;const py=getPayer((getPatient(inv.patientId)||{}).payerId);const k=py?py.name:'—';(by[k]=by[k]||{n:0,v:0});by[k].n++;by[k].v=roundMoney(by[k].v+inv.ins);});state.insPay=state.insPay||{};const r=Object.entries(by);body=r.length?'<div class="table-wrap"><table><thead><tr><th>الشركة</th><th>المستحق</th><th>المسدد</th><th>المتبقي</th><th></th></tr></thead><tbody>'+r.map(([n,x])=>{const pd=state.insPay[n]||0;return `<tr><td class="cell-name">${esc(n)}<div style="font-size:10px;color:var(--muted)">${x.n} فاتورة</div></td><td class="cell-money">${fmtMoney(x.v)}</td><td class="cell-money pos">${fmtMoney(pd)}</td><td class="cell-money neg">${fmtMoney(roundMoney(x.v-pd))}</td><td><button class="btn success sm" onclick="recInsPay(decodeURIComponent('${encodeURIComponent(n)}'))">💵 سداد</button></td></tr>`;}).join('')+'</tbody></table></div>':'<div class="empty"><p>لا مستحقات تأمين</p></div>';}
 openModal({title:'📊 '+REPORTS.find(r=>r.id===id).title,body,size:'lg'});}
-function setSettingsTab(tab){state.settingsTab=tab;save();document.querySelectorAll('#settings-tabs .page-tab').forEach(b=>b.classList.toggle('active',b.dataset.stab===tab));['hospital','rooms','stay','or','doctors','users','payers','backup','audit','review'].forEach(t=>{const el=document.getElementById('set-'+t);if(el) el.style.display=t===tab?(t==='or'?'grid':'block'):'none';});renderSettings();}
-function renderSettings(){try{renderOrSettings();}catch(e){console.error(e);}try{renderBackupInfo();}catch(e){}try{renderReviewTasks();}catch(e){console.error(e);}try{renderStaySettings();}catch(e){console.error(e);}document.querySelectorAll('#settings-tabs .page-tab').forEach(b=>b.classList.toggle('active',b.dataset.stab===state.settingsTab));['hospital','rooms','stay','or','doctors','users','payers','backup','audit','review'].forEach(t=>{const el=document.getElementById('set-'+t);if(el) el.style.display=t===state.settingsTab?(t==='or'?'grid':'block'):'none';});const el=id=>document.getElementById(id);if(el('set-name')) el('set-name').value=state.hospitalName;if(el('room-count-input')) el('room-count-input').value=state.rooms.length;if(el('rooms-count-badge')) el('rooms-count-badge').textContent=state.rooms.length;if(el('rooms-settings-tbody')){el('rooms-settings-tbody').innerHTML=state.rooms.map(r=>{const ti=state.roomTypes[r.type]||{name:'—',price:0};const price=getRoomPrice(r);const hasCustom=r.customPrice!==null&&r.customPrice!==undefined;const patient=getActiveInRoom(r.num);let statusBadge;if(r.maintenance) statusBadge='<span class="pill pending">🔧 صيانة</span>';else if(r.cleaning) statusBadge='<span class="pill info">🧹 تنظيف</span>';else if(patient) statusBadge=`<span class="pill paid" style="background:var(--primary-light);color:var(--primary-dark)">👤 ${esc(patient.name.length>12?patient.name.slice(0,12)+'…':patient.name)}</span>`;else statusBadge='<span class="pill" style="background:var(--success-bg);color:var(--success-text)">🟢 متاحة</span>';return `<tr><td class="cell-id">${r.num}</td><td class="cell-name">${esc(getRoomName(r))}</td><td><span class="pill" style="background:var(--primary-50);color:var(--primary-dark)">${ti.name}</span></td><td>${statusBadge}</td><td><button class="btn ghost sm" onclick="openEditRoom(${r.num})">✏️</button> ${!patient?`<button class="btn danger sm" onclick="deleteRoom(${r.num})">🗑️</button>`:''}</td></tr>`;}).join('')||'<tr><td colspan="5" class="empty">لا توجد غرف</td></tr>';}{const _sb=el('doc-share-basis');if(_sb) _sb.value=(state.meta||{}).docShareBasis||'collected';}if(el('doctors-list')) el('doctors-list').innerHTML=state.doctors.map(d=>`<div style="display:flex;align-items:center;gap:10px;padding:10px;background:var(--surface);border-radius:9px;border:1px solid var(--border)"><div style="width:36px;height:36px;border-radius:9px;background:linear-gradient(135deg,#0d9488,#0891b2);color:#fff;display:grid;place-items:center;font-weight:800;font-size:14px">${esc(d.name.replace(/^د\.\s*/,'').charAt(0))}</div><div style="flex:1"><div style="font-weight:800;font-size:12.5px">${esc(d.name)}</div><div style="font-size:10.5px;color:var(--muted);font-weight:700">${esc(d.specialty)} — ${fmtMoney(d.fee||0)} · استشارة ${fmtMoney(consultFeeOf(d))}</div></div><button class="btn ghost sm" onclick="openDoctorFile('${d.id}')">📁 ملف</button><button class="icon-btn" onclick="delDoctor('${d.id}')">✕</button></div>`).join('')||'<div class="empty" style="padding:20px"><p>لا أطباء</p></div>';if(el('anes-chips')) el('anes-chips').innerHTML=state.anesthesiologists.map(a=>`<div style="display:inline-flex;align-items:center;gap:6px;padding:7px 11px;background:var(--blue-soft);border:1.5px solid var(--blue-border);border-radius:20px;font-size:12px;font-weight:800;color:var(--blue-text)">💉 ${esc(a.name)}<button onclick="delAnes('${a.id}')" style="background:rgba(29,78,216,0.15);border:0;color:var(--blue-text);width:18px;height:18px;border-radius:50%;cursor:pointer;font-size:10px">✕</button></div>`).join('');if(el('users-list')) el('users-list').innerHTML=state.users.map(u=>`<div style="background:#fff;border:1.5px solid var(--border);border-radius:12px;padding:14px;display:flex;gap:12px"><div style="width:44px;height:44px;border-radius:11px;background:linear-gradient(135deg,#0f766e,#0891b2);color:#fff;display:grid;place-items:center;font-weight:800;font-size:17px">${esc(u.name.charAt(0))}</div><div style="flex:1"><div style="font-weight:800;font-size:13.5px;margin-bottom:2px">${esc(u.name)}</div><div style="font-size:11px;color:var(--muted);font-weight:600">@${esc(u.username)} · ${ROLE_LABELS[u.role]||u.role}</div></div><button class="btn ghost sm" onclick="openUserForm('${u.id}')">✏️</button></div>`).join('');if(el('payers-list')) el('payers-list').innerHTML=state.payers.map(p=>`<div style="display:flex;align-items:center;gap:10px;padding:10px;background:var(--surface);border-radius:9px;border:1px solid var(--border)"><div style="flex:1"><div style="font-weight:800;font-size:12.5px">${esc(p.name)}</div><div style="font-size:10.5px;color:var(--muted);font-weight:700">تحمل: ${p.copay}% · تغطية: ${p.coverage}%</div></div><button class="icon-btn" onclick="delPayer('${p.id}')">✕</button></div>`).join('')||'<div class="empty" style="padding:20px"><p>لا شركات تأمين</p></div>';if(el('audit-list')) renderAudit();}
+function setSettingsTab(tab){state.settingsTab=tab;save();document.querySelectorAll('#settings-tabs .page-tab').forEach(b=>b.classList.toggle('active',b.dataset.stab===tab));['hospital','rooms','stay','or','doctors','users','payers','backup','cloud','audit','review'].forEach(t=>{const el=document.getElementById('set-'+t);if(el) el.style.display=t===tab?(t==='or'?'grid':'block'):'none';});renderSettings();}
+function renderSettings(){if(state.settingsTab==='cloud')cloudRender();try{renderOrSettings();}catch(e){console.error(e);}try{renderBackupInfo();}catch(e){}try{renderReviewTasks();}catch(e){console.error(e);}try{renderStaySettings();}catch(e){console.error(e);}document.querySelectorAll('#settings-tabs .page-tab').forEach(b=>b.classList.toggle('active',b.dataset.stab===state.settingsTab));['hospital','rooms','stay','or','doctors','users','payers','backup','cloud','audit','review'].forEach(t=>{const el=document.getElementById('set-'+t);if(el) el.style.display=t===state.settingsTab?(t==='or'?'grid':'block'):'none';});const el=id=>document.getElementById(id);if(el('set-name')) el('set-name').value=state.hospitalName;if(el('room-count-input')) el('room-count-input').value=state.rooms.length;if(el('rooms-count-badge')) el('rooms-count-badge').textContent=state.rooms.length;if(el('rooms-settings-tbody')){el('rooms-settings-tbody').innerHTML=state.rooms.map(r=>{const ti=state.roomTypes[r.type]||{name:'—',price:0};const price=getRoomPrice(r);const hasCustom=r.customPrice!==null&&r.customPrice!==undefined;const patient=getActiveInRoom(r.num);let statusBadge;if(r.maintenance) statusBadge='<span class="pill pending">🔧 صيانة</span>';else if(r.cleaning) statusBadge='<span class="pill info">🧹 تنظيف</span>';else if(patient) statusBadge=`<span class="pill paid" style="background:var(--primary-light);color:var(--primary-dark)">👤 ${esc(patient.name.length>12?patient.name.slice(0,12)+'…':patient.name)}</span>`;else statusBadge='<span class="pill" style="background:var(--success-bg);color:var(--success-text)">🟢 متاحة</span>';return `<tr><td class="cell-id">${r.num}</td><td class="cell-name">${esc(getRoomName(r))}</td><td><span class="pill" style="background:var(--primary-50);color:var(--primary-dark)">${ti.name}</span></td><td>${statusBadge}</td><td><button class="btn ghost sm" onclick="openEditRoom(${r.num})">✏️</button> ${!patient?`<button class="btn danger sm" onclick="deleteRoom(${r.num})">🗑️</button>`:''}</td></tr>`;}).join('')||'<tr><td colspan="5" class="empty">لا توجد غرف</td></tr>';}{const _sb=el('doc-share-basis');if(_sb) _sb.value=(state.meta||{}).docShareBasis||'collected';}if(el('doctors-list')) el('doctors-list').innerHTML=state.doctors.map(d=>`<div style="display:flex;align-items:center;gap:10px;padding:10px;background:var(--surface);border-radius:9px;border:1px solid var(--border)"><div style="width:36px;height:36px;border-radius:9px;background:linear-gradient(135deg,#0d9488,#0891b2);color:#fff;display:grid;place-items:center;font-weight:800;font-size:14px">${esc(d.name.replace(/^د\.\s*/,'').charAt(0))}</div><div style="flex:1"><div style="font-weight:800;font-size:12.5px">${esc(d.name)}</div><div style="font-size:10.5px;color:var(--muted);font-weight:700">${esc(d.specialty)} — ${fmtMoney(d.fee||0)} · استشارة ${fmtMoney(consultFeeOf(d))}</div></div><button class="btn ghost sm" onclick="openDoctorFile('${d.id}')">📁 ملف</button><button class="icon-btn" onclick="delDoctor('${d.id}')">✕</button></div>`).join('')||'<div class="empty" style="padding:20px"><p>لا أطباء</p></div>';if(el('anes-chips')) el('anes-chips').innerHTML=state.anesthesiologists.map(a=>`<div style="display:inline-flex;align-items:center;gap:6px;padding:7px 11px;background:var(--blue-soft);border:1.5px solid var(--blue-border);border-radius:20px;font-size:12px;font-weight:800;color:var(--blue-text)">💉 ${esc(a.name)}<button onclick="delAnes('${a.id}')" style="background:rgba(29,78,216,0.15);border:0;color:var(--blue-text);width:18px;height:18px;border-radius:50%;cursor:pointer;font-size:10px">✕</button></div>`).join('');if(el('users-list')) el('users-list').innerHTML=state.users.map(u=>`<div style="background:#fff;border:1.5px solid var(--border);border-radius:12px;padding:14px;display:flex;gap:12px"><div style="width:44px;height:44px;border-radius:11px;background:linear-gradient(135deg,#0f766e,#0891b2);color:#fff;display:grid;place-items:center;font-weight:800;font-size:17px">${esc(u.name.charAt(0))}</div><div style="flex:1"><div style="font-weight:800;font-size:13.5px;margin-bottom:2px">${esc(u.name)}</div><div style="font-size:11px;color:var(--muted);font-weight:600">@${esc(u.username)} · ${ROLE_LABELS[u.role]||u.role}</div></div><button class="btn ghost sm" onclick="openUserForm('${u.id}')">✏️</button></div>`).join('');if(el('payers-list')) el('payers-list').innerHTML=state.payers.map(p=>`<div style="display:flex;align-items:center;gap:10px;padding:10px;background:var(--surface);border-radius:9px;border:1px solid var(--border)"><div style="flex:1"><div style="font-weight:800;font-size:12.5px">${esc(p.name)}</div><div style="font-size:10.5px;color:var(--muted);font-weight:700">تحمل: ${p.copay}% · تغطية: ${p.coverage}%</div></div><button class="icon-btn" onclick="delPayer('${p.id}')">✕</button></div>`).join('')||'<div class="empty" style="padding:20px"><p>لا شركات تأمين</p></div>';if(el('audit-list')) renderAudit();}
 function saveHospName(){const v=document.getElementById('set-name').value.trim();if(!v) return;state.hospitalName=v;document.getElementById('sidebar-hosp').textContent=v;document.getElementById('topbar-title').textContent=v;save();toastSuccess('تم');}
 async function applyRoomCount(){if(!requirePerm('settings.hospital')) return;const newCount=parseInt(document.getElementById('room-count-input').value);if(!newCount||newCount<1||newCount>200){toastWarn('العدد بين 1 و 200');return;}const current=state.rooms.length;if(newCount===current){toast('العدد لم يتغير','info');return;}if(newCount>current){const needed=newCount-current;if(!await appConfirm(`سيتم إضافة ${needed} غرفة جديدة بالسعر الافتراضي. متابعة؟`)) return;let nextNum=current>0?Math.max(...state.rooms.map(r=>r.num))+1:1;for(let i=0;i<needed;i++){state.rooms.push({num:nextNum,name:`غرفة ${nextNum}`,type:'standard',customPrice:null,maintenance:false,cleaning:false,cleaningUntil:null});nextNum++;}state.rooms.sort((a,b)=>a.num-b.num);state.roomCount=state.rooms.length;logAction('إضافة غرف','',`+${needed}`);save();renderAll();toastSuccess(`تمت إضافة ${needed} غرفة`);}else{const toRemove=current-newCount;const sorted=[...state.rooms].sort((a,b)=>b.num-a.num);const removed=[];const blocked=[];for(const room of sorted){if(removed.length>=toRemove) break;if(getActiveInRoom(room.num)){blocked.push(room);continue;}removed.push(room.num);}if(!removed.length){toastError(`لا يمكن الحذف — ${blocked.length} غرفة مشغولة`);return;}const msg=blocked.length?`سيتم حذف ${removed.length} غرفة. ${blocked.length} غرفة مشغولة لن تُحذف.`:`سيتم حذف ${removed.length} غرفة.`;if(!await appConfirm(msg+' متابعة؟')) return;state.rooms=state.rooms.filter(r=>!removed.includes(r.num));state.roomCount=state.rooms.length;logAction('حذف غرف','',`-${removed.length}`);save();renderAll();toastSuccess(`تم حذف ${removed.length} غرفة`);}}
 function openAddRoom(){if(!requirePerm('settings.hospital')) return;const nextNum=state.rooms.length?Math.max(...state.rooms.map(r=>r.num))+1:1;const typeOpts=Object.keys(state.roomTypes).map(t=>`<option value="${t}">${esc(state.roomTypes[t].name)} — ${fmtMoney(state.roomTypes[t].price)}</option>`).join('');const body=`<form id="arf"><div class="form-grid"><div class="field"><label>رقم الغرفة</label><input type="number" id="ar-num" value="${nextNum}" min="1"></div><div class="field"><label>الاسم</label><input id="ar-name" value="غرفة ${nextNum}"></div><div class="field full"><label>النوع</label><select id="ar-type">${typeOpts}</select></div><div class="field full"><label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:12px;background:var(--surface);border:1.5px solid var(--border);border-radius:10px"><input type="checkbox" id="ar-custom" style="width:auto;margin:0;accent-color:var(--primary)"><span>✏️ سعر مخصص</span></label></div><div class="field full" id="ar-price-wrap" style="display:none"><label>السعر المخصص (ج.م/ليلة)</label><input type="number" id="ar-price" min="0" step="0.01"></div></div><div style="display:flex;gap:10px;margin-top:16px"><button type="submit" class="btn primary">➕ إضافة</button><button type="button" class="btn ghost" data-close>إلغاء</button></div></form>`;const ov=openModal({title:'➕ إضافة غرفة',body});ov.querySelector('#ar-custom').addEventListener('change',()=>{ov.querySelector('#ar-price-wrap').style.display=ov.querySelector('#ar-custom').checked?'block':'none';if(ov.querySelector('#ar-custom').checked&&!ov.querySelector('#ar-price').value){const t=ov.querySelector('#ar-type').value;ov.querySelector('#ar-price').value=state.roomTypes[t].price;}});ov.querySelector('#ar-type').addEventListener('change',()=>{if(ov.querySelector('#ar-custom').checked&&!ov.querySelector('#ar-price').value){const t=ov.querySelector('#ar-type').value;ov.querySelector('#ar-price').value=state.roomTypes[t].price;}});ov.querySelector('#arf').addEventListener('submit',e=>{e.preventDefault();const num=parseInt(ov.querySelector('#ar-num').value);const name=ov.querySelector('#ar-name').value.trim()||`غرفة ${num}`;const type=ov.querySelector('#ar-type').value;const customOn=ov.querySelector('#ar-custom').checked;const customPrice=customOn?(parseFloat(ov.querySelector('#ar-price').value)||0):null;if(!num||num<1){toastWarn('رقم غير صالح');return;}if(state.rooms.find(r=>r.num===num)){toastError('الرقم مستخدم');return;}state.rooms.push({num,name,type,customPrice,maintenance:false,cleaning:false,cleaningUntil:null});state.rooms.sort((a,b)=>a.num-b.num);state.roomCount=state.rooms.length;logAction('إضافة غرفة',name,state.roomTypes[type].name);save();ov.remove();renderAll();toastSuccess('تمت الإضافة');});}
@@ -5758,6 +5797,126 @@ function renderSurgery(){
     return `<tr><td class="cell-name">${esc(p?.name||'—')}</td><td>${esc(o.procedure||'—')}</td><td>${esc(o.surgeonName||'—')}</td><td class="cell-time">${fmtDT(o.startTime)}</td><td class="cell-time">${o.endTime?fmtDT(o.endTime):'—'}</td><td><span class="pill ${st.c}">${st.l}</span></td><td class="cell-act">${act}</td></tr>`;
   }).join(''):'<tr><td colspan="7" class="empty">لا عمليات في هذه الفترة</td></tr>';
 }
+/* ============================================================
+   V11.2 CLOUD BRIDGE — Dual identity, local employee credentials
+   Cloud payload never contains employee password hashes/salts.
+   ============================================================ */
+const CLOUD_CFG_KEY='his_v11_cloud_config';
+const CLOUD_SESSION_KEY='his_v11_cloud_session';
+const CLOUD_REV_KEY='his_v11_cloud_revision';
+function cloudConfig(){try{return JSON.parse(localStorage.getItem(CLOUD_CFG_KEY)||'{}')||{};}catch(_){return {};}}
+function cloudSession(){try{const x=JSON.parse(sessionStorage.getItem(CLOUD_SESSION_KEY)||'null');return x&&x.access_token&&x.refresh_token?x:null;}catch(_){return null;}}
+function cloudSetStatus(msg,type='info'){
+  const el=document.getElementById('cloud-status');if(!el)return;
+  const cls=type==='ok'?'success':type==='error'?'danger':type==='warn'?'warn':'info';
+  el.className='alert '+cls;el.innerHTML='<span class="ic">'+(type==='ok'?'✓':type==='error'?'✕':type==='warn'?'⚠️':'ℹ️')+'</span><div>'+esc(msg)+'</div>';
+}
+function cloudRevision(){try{return Math.max(0,Number(localStorage.getItem(CLOUD_REV_KEY)||0)||0);}catch(_){return 0;}}
+function cloudRender(){
+  const c=cloudConfig(),sess=cloudSession();
+  const u=document.getElementById('cloud-url'),k=document.getElementById('cloud-key'),r=document.getElementById('cloud-revision');
+  if(u&&document.activeElement!==u)u.value=c.url||'';
+  if(k&&document.activeElement!==k)k.value=c.key||'';
+  if(r)r.textContent='رقم مراجعة السحابة على هذا الجهاز: '+cloudRevision();
+  if(sess)cloudSetStatus('جلسة Supabase موجودة في علامة التبويب الحالية. اضغط اختبار الاتصال للتحقق من صلاحية العضوية.','ok');
+}
+function cloudSaveConfig(){
+  const url=(document.getElementById('cloud-url')?.value||'').trim().replace(/\/$/,'');
+  const key=(document.getElementById('cloud-key')?.value||'').trim();
+  if(!/^https:\/\/[a-z0-9-]+\.supabase\.co$/i.test(url)){cloudSetStatus('رابط المشروع غير صحيح. استخدم رابط مشروع Supabase الرسمي.','error');return false;}
+  if(!key||/service_role|sb_secret/i.test(key)){cloudSetStatus('استخدم Publishable key أو anon key فقط. المفتاح السري ممنوع.','error');return false;}
+  localStorage.setItem(CLOUD_CFG_KEY,JSON.stringify({url,key}));
+  cloudSetStatus('تم حفظ رابط المشروع والمفتاح العام على هذا الجهاز.','ok');return true;
+}
+async function cloudRequest(path,opts={},allowRefresh=true){
+  const c=cloudConfig();let sess=cloudSession();if(!c.url||!c.key)throw new Error('احفظ إعدادات مشروع Supabase أولاً.');
+  if(!sess?.access_token)throw new Error('سجّل الدخول إلى حساب Supabase أولاً.');
+  const headers={apikey:c.key,Authorization:'Bearer '+sess.access_token,'Content-Type':'application/json',...(opts.headers||{})};
+  let response=await fetch(c.url+path,{...opts,headers});
+  if(response.status===401&&allowRefresh&&sess.refresh_token){
+    const rr=await fetch(c.url+'/auth/v1/token?grant_type=refresh_token',{method:'POST',headers:{apikey:c.key,'Content-Type':'application/json'},body:JSON.stringify({refresh_token:sess.refresh_token})});
+    const rd=await rr.json().catch(()=>({}));if(!rr.ok)throw new Error(rd.msg||rd.message||rd.error_description||'انتهت جلسة Supabase؛ سجّل الدخول مرة أخرى.');
+    sess={access_token:rd.access_token,refresh_token:rd.refresh_token||sess.refresh_token,expires_at:rd.expires_at||Math.floor(Date.now()/1000)+(rd.expires_in||3600),user:rd.user||sess.user};
+    sessionStorage.setItem(CLOUD_SESSION_KEY,JSON.stringify(sess));headers.Authorization='Bearer '+sess.access_token;response=await fetch(c.url+path,{...opts,headers});
+  }
+  const data=await response.json().catch(()=>null);
+  if(!response.ok){const msg=data?.message||data?.msg||data?.error_description||data?.error||('HTTP '+response.status);throw new Error(msg);}
+  return data;
+}
+async function cloudLogin(){
+  if(!cloudSaveConfig())return;
+  const c=cloudConfig(),email=(document.getElementById('cloud-email')?.value||'').trim(),password=document.getElementById('cloud-password')?.value||'';
+  if(!email||!password){cloudSetStatus('أدخل بريد وكلمة مرور حساب Supabase.','error');return;}
+  cloudSetStatus('جارٍ تسجيل الدخول إلى Supabase...','info');
+  try{
+    const res=await fetch(c.url+'/auth/v1/token?grant_type=password',{method:'POST',headers:{apikey:c.key,'Content-Type':'application/json'},body:JSON.stringify({email,password})});
+    const data=await res.json().catch(()=>({}));if(!res.ok)throw new Error(data.msg||data.message||data.error_description||'فشل تسجيل الدخول.');
+    if(!data.access_token||!data.refresh_token)throw new Error('استجابة المصادقة غير مكتملة.');
+    sessionStorage.setItem(CLOUD_SESSION_KEY,JSON.stringify({access_token:data.access_token,refresh_token:data.refresh_token,expires_at:data.expires_at||Math.floor(Date.now()/1000)+(data.expires_in||3600),user:data.user||null}));
+    document.getElementById('cloud-password').value='';
+    cloudSetStatus('تم تسجيل الدخول. جارٍ التحقق من عضوية المستخدم وصلاحية الوصول...','info');
+    await cloudCheck();
+  }catch(e){sessionStorage.removeItem(CLOUD_SESSION_KEY);cloudSetStatus('تعذر الاتصال: '+(e.message||e),'error');}
+}
+async function cloudLogout(){
+  const c=cloudConfig(),sess=cloudSession();
+  try{if(sess?.access_token&&c.url&&c.key)await fetch(c.url+'/auth/v1/logout',{method:'POST',headers:{apikey:c.key,Authorization:'Bearer '+sess.access_token}});}catch(_){}
+  sessionStorage.removeItem(CLOUD_SESSION_KEY);cloudSetStatus('تم تسجيل الخروج من حساب المزامنة. حساب التطبيق الداخلي لم يتأثر.','info');
+}
+function cloudPayload(){
+  const payload={...state,currentUser:null};
+  // Local employee login credentials are device-local secrets and never leave this browser.
+  payload.users=(state.users||[]).map(u=>{const x={...u};delete x.password;delete x.passwordSalt;return x;});
+  return payload;
+}
+function cloudMergeUsers(remoteUsers,localUsers){
+  const local=new Map((localUsers||[]).map(u=>[String(u.id),u]));
+  return (Array.isArray(remoteUsers)?remoteUsers:[]).map(ru=>{
+    const lu=local.get(String(ru.id));
+    if(lu)return {...ru,password:lu.password||'',passwordSalt:lu.passwordSalt||'',mustChangePassword:!!lu.mustChangePassword,needsSetup:!!lu.needsSetup,disabled:!!lu.disabled};
+    return {...ru,password:'',passwordSalt:'',mustChangePassword:true,needsSetup:true,disabled:true};
+  }).concat((localUsers||[]).filter(u=>!(remoteUsers||[]).some(ru=>String(ru.id)===String(u.id))));
+}
+function cloudDownloadBackup(){
+  try{const copy={...state,currentUser:null};const blob=new Blob([JSON.stringify(copy)],{type:'application/json;charset=utf-8'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='hospital_before_cloud_pull_'+todayISO()+'_'+Date.now()+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1500);return true;}catch(e){return false;}
+}
+async function cloudCheck(){
+  cloudSetStatus('جارٍ فحص الجلسة وعضوية المستشفى...','info');
+  try{
+    const rows=await cloudRequest('/rest/v1/hospital_app_state?id=eq.main&select=id,revision,updated_at&limit=1',{method:'GET',headers:{Accept:'application/json'}});
+    if(!Array.isArray(rows))throw new Error('استجابة قاعدة البيانات غير متوقعة.');
+    cloudSetStatus(rows.length?'الاتصال ناجح والعضوية تسمح بقراءة حالة المستشفى. المراجعة السحابية: '+rows[0].revision:'الاتصال ناجح والعضوية تسمح بالوصول. لا توجد نسخة سحابية بعد؛ يمكن رفع الجهاز الأول كبداية.','ok');
+    return true;
+  }catch(e){cloudSetStatus('فشل الاختبار: '+(e.message||e),'error');return false;}
+}
+async function cloudPull(){
+  if(state?.currentUser?.role!=='admin'){cloudSetStatus('جلب النسخة الكاملة متاح لمدير التطبيق فقط لحماية بيانات المستشفى.','error');return;}
+  if(!await appConfirm('سيتم تنزيل نسخة احتياطية أولاً، ثم استبدال بيانات هذا الجهاز ببيانات السحابة. حسابات الموظفين وكلمات مرورهم المحلية ستظل محفوظة على هذا الجهاز. متابعة؟'))return;
+  if(!cloudDownloadBackup()){cloudSetStatus('تعذر إنشاء نسخة احتياطية؛ أُلغي الجلب.','error');return;}
+  cloudSetStatus('جارٍ جلب النسخة السحابية...','info');
+  try{
+    const rows=await cloudRequest('/rest/v1/hospital_app_state?id=eq.main&select=id,data,revision,updated_at,updated_by&limit=1',{method:'GET',headers:{Accept:'application/json'}});
+    if(!Array.isArray(rows)||!rows.length){cloudSetStatus('لا توجد نسخة سحابية بعد. لم يتم تغيير بيانات هذا الجهاز. استخدم رفع هذا الجهاز كبداية.','warn');return;}
+    const remote=rows[0].data;if(!remote||typeof remote!=='object'||Array.isArray(remote))throw new Error('بنية البيانات السحابية غير صالحة.');
+    const localUsers=state.users||[];const merged={...defaultState(),...remote};merged.users=cloudMergeUsers(remote.users,localUsers);merged.currentUser=state.currentUser;
+    const requiredArrays=['patients','medications','prescriptions','invoices','appointments','purchases','salaries','auditLog','doctors','anesthesiologists','orStaff','rooms','users','notifications','orSchedule','payers','stockMoves','stocktakes','supplyReqs','supplierPays','purchaseOrders','cashCloses','shifts','settlements','buyReqs','services','checkoutQueue','stayRooms','stays','stayEvents','payroll'];
+    for(const k of requiredArrays)if(!Array.isArray(merged[k]))throw new Error('النسخة السحابية تحتوي بنية غير صالحة في '+k);
+    state=merged;localStorage.setItem(CLOUD_REV_KEY,String(Number(rows[0].revision)||0));save();_flushSave();
+    cloudRender();cloudSetStatus('تم جلب النسخة السحابية وحفظها محلياً. بيانات اعتماد الموظفين لم تُستبدل أو تُرفع.','ok');renderAll();renderSettings();
+  }catch(e){cloudSetStatus('فشل الجلب: '+(e.message||e),'error');}
+}
+async function cloudPush(){
+  if(state?.currentUser?.role!=='admin'){cloudSetStatus('رفع النسخة الكاملة متاح لمدير التطبيق فقط لحماية بيانات المستشفى.','error');return;}
+  if(!state?.currentUser){cloudSetStatus('سجّل الدخول إلى التطبيق أولاً.','error');return;}
+  if(!await appConfirm('سيتم رفع بيانات المستشفى الحالية إلى السحابة كنسخة كاملة. كلمات مرور الموظفين وبصماتها مستبعدة من الإرسال. متابعة؟'))return;
+  cloudSetStatus('جارٍ رفع بيانات المستشفى والتحقق من رقم المراجعة...','info');
+  try{
+    const result=await cloudRequest('/rest/v1/rpc/hospital_sync_state',{method:'POST',body:JSON.stringify({p_data:cloudPayload(),p_expected_revision:cloudRevision()})});
+    if(!result||result.ok!==true){if(result?.conflict){cloudSetStatus('تم إيقاف الرفع لحماية تحديث أحدث على جهاز آخر. رقم المراجعة السحابي الحالي: '+result.revision+'. جلب النسخة ومراجعتها مطلوب قبل المحاولة التالية.','warn');return;}throw new Error('رفض الخادم عملية الحفظ أو أعاد نتيجة غير متوقعة.');}
+    localStorage.setItem(CLOUD_REV_KEY,String(Number(result.revision)||0));cloudRender();cloudSetStatus('تم رفع بيانات المستشفى بنجاح. رقم المراجعة الجديد: '+result.revision+'.','ok');
+  }catch(e){cloudSetStatus('فشل الرفع: '+(e.message||e),'error');}
+}
+
 function init(){
   state=loadState();
   if(renderStorageRecovery()) return;
@@ -5789,7 +5948,7 @@ function init(){
     else {state.currentUser=null;save();document.getElementById('login-screen').style.display='grid';}
   }
 }
-Object.assign(window,{openORFinance,openORCard,saveOrDistSettings,saveOrRooms,saveOrSplit,orSplitPreview,setOrPct,addAnes2,addOrStaff,delOrStaff,renderOrSettings,openORTeam,orAct,orRoomNew,renderORBoard,orToggleTeam,openORBoard,openORForm,openRoomNote,setRoomsTab,renderRooms,toggleFlt,clearFlt,updFltBadge,openDoctorQueue,docQDraw,openMyProfile,showLoading,hideLoading,withLoading,doLogin,doLogout,toggleSidebar,navigateTo,setPatientTab,setBillTab,setSettingsTab,shiftApptDate,setApptToday,setApptDate,openPatientChooser,openPatientForm,openPatientProfile,openEditPatient,openDischarge,openTransfer,openPatientInfo,openDiagnosis,deleteDiagnosis,openPrescription,openBooking,openBedActions,openQueueDisplay,closeQueueDisplay,queueWA,toggleSound,openQueueManager,queueSet,queueMove,queuePrompt,queueReset,toggleMaint,doneCleaning,setStayFilter,setStayTab,openStayForPatient,changeStayDoctor,openStayAdmit,endStay,doneStayCleaning,toggleStayMaint,applyStaySettings,applyStayPriceAll,openEditStayRoom,deleteStayRoom,openApptForm,registerAppt,openApptDetail,openMedForm,openRestock,openDispense,openInvoiceDetail,openPay,openPurchaseForm,delPurchase,openDoctorFile,openStore,restoreSnap,openMedRequest,openFullLog,openSuppliers,openReturnVisit,openSettlement,openShift,openNetProfit,openExpiry,openDiscount,setPuFilter,markPurchasePaid,openFinBudget,openReport,saveHospName,addDoctor,delDoctor,addAnes,delAnes,addPayer,delPayer,openUserForm,exportBackup,importBackup,wipeData,seedData,toggleNotif,closeNotif,markAllRead,clearNotifs,readNotif,renderNotifPanel,openSearch,showUserMenu,exportPatients,logAction,toast,toastSuccess,toastWarn,toastError,openAddRoom,openEditRoom,deleteRoom,applyRoomCount,setInvTab,setMedFilter,setRoomFilter,openAddNote,openSurgery,endSurgery,cancelCall,reassignDoctor,finishVisit,callNext,dashCallNext,refundOverpay,setORTab,finishFlow,endStayOnly,openVitals,openLabs,printInvoice});
+Object.assign(window,{cloudSaveConfig,cloudLogin,cloudLogout,cloudCheck,cloudPull,cloudPush,openORFinance,openORCard,saveOrDistSettings,saveOrRooms,saveOrSplit,orSplitPreview,setOrPct,addAnes2,addOrStaff,delOrStaff,renderOrSettings,openORTeam,orAct,orRoomNew,renderORBoard,orToggleTeam,openORBoard,openORForm,openRoomNote,setRoomsTab,renderRooms,toggleFlt,clearFlt,updFltBadge,openDoctorQueue,docQDraw,openMyProfile,showLoading,hideLoading,withLoading,doLogin,doLogout,toggleSidebar,navigateTo,setPatientTab,setBillTab,setSettingsTab,shiftApptDate,setApptToday,setApptDate,openPatientChooser,openPatientForm,openPatientProfile,openEditPatient,openDischarge,openTransfer,openPatientInfo,openDiagnosis,deleteDiagnosis,openPrescription,openBooking,openBedActions,openQueueDisplay,closeQueueDisplay,queueWA,toggleSound,openQueueManager,queueSet,queueMove,queuePrompt,queueReset,toggleMaint,doneCleaning,setStayFilter,setStayTab,openStayForPatient,changeStayDoctor,openStayAdmit,endStay,doneStayCleaning,toggleStayMaint,applyStaySettings,applyStayPriceAll,openEditStayRoom,deleteStayRoom,openApptForm,registerAppt,openApptDetail,openMedForm,openRestock,openDispense,openInvoiceDetail,openPay,openPurchaseForm,delPurchase,openDoctorFile,openStore,restoreSnap,openMedRequest,openFullLog,openSuppliers,openReturnVisit,openSettlement,openShift,openNetProfit,openExpiry,openDiscount,setPuFilter,markPurchasePaid,openFinBudget,openReport,saveHospName,addDoctor,delDoctor,addAnes,delAnes,addPayer,delPayer,openUserForm,exportBackup,importBackup,wipeData,seedData,toggleNotif,closeNotif,markAllRead,clearNotifs,readNotif,renderNotifPanel,openSearch,showUserMenu,exportPatients,logAction,toast,toastSuccess,toastWarn,toastError,openAddRoom,openEditRoom,deleteRoom,applyRoomCount,setInvTab,setMedFilter,setRoomFilter,openAddNote,openSurgery,endSurgery,cancelCall,reassignDoctor,finishVisit,callNext,dashCallNext,refundOverpay,setORTab,finishFlow,endStayOnly,openVitals,openLabs,printInvoice});
 
 setInterval(()=>{try{critWatch();}catch(e){}},5000);
 setInterval(()=>{try{if(document.getElementById('page-rooms')?.classList.contains('active')&&state?.roomsTab==='or'&&document.getElementById('rooms-or-view')?.style.display!=='none')tickORClocks();}catch(e){}},1000);
