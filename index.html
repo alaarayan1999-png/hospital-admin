@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>مستشفى الـ يوسف — نظام إدارة المستشفيات</title>
-<!-- V11.2: إصلاحات واجهة إضافية فوق V11.1 — انظر تقرير التنفيذ -->
+<!-- DB-ONLY: تم تعطيل التخزين المحلي — التشغيل يتطلب بوابة Supabase آمنة -->
 <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -1433,7 +1433,7 @@ input[type="datetime-local"]::-webkit-date-and-time-value,input[type="date"]::-w
     <h1 id="login-hosp">مستشفى الـ يوسف</h1>
     <p class="sub">نظام إدارة المستشفيات</p>
     <div id="login-err" class="login-err"></div>
-    <div class="field"><label>اسم المستخدم</label><input id="login-user" placeholder="admin" autocomplete="username"></div>
+    <div class="field"><label>اسم المستخدم</label><input id="login-user" placeholder="اسم المستخدم السحابي" autocomplete="username"></div>
     <div class="field"><label>كلمة المرور</label><input id="login-pass" type="password" placeholder="••••••" autocomplete="current-password" minlength="4"></div>
     <button class="login-btn" onclick="doLogin()">دخول النظام</button>
     <button type="button" class="btn ghost" style="width:100%;margin-top:9px;justify-content:center" onclick="openSignupModal()">إنشاء حساب جديد</button>
@@ -1626,7 +1626,7 @@ input[type="datetime-local"]::-webkit-date-and-time-value,input[type="date"]::-w
       <section id="page-pharmacy" class="page">
         <div class="page-head">
           <div><h2>الصيدلية</h2><p class="sub">صرف الروشتات ورصيد رف الصيدلية — التوريد والمخزن في صفحة «المخزن والمشتريات»</p></div>
-          <div class="head-actions"><button class="btn ghost" onclick="openExpiry()" data-perm="med.view">⏰ الصلاحية</button><button class="btn ghost" onclick="openMedReturn()" data-perm="med.dispense">↩️ مرتجع دواء</button><button class="btn primary" onclick="openMedRequest()" data-perm="med.view">📨 طلب دواء من المخزن</button><button class="btn primary" onclick="openMedForm()" data-perm="med.add">+ دواء</button></div>
+          <div class="head-actions"><button class="btn ghost" onclick="openInventoryReconciliation()" data-perm="med.view">📊 مطابقة المخزون</button><button class="btn ghost" onclick="openExpiry()" data-perm="med.view">⏰ الصلاحية</button><button class="btn ghost" onclick="openMedReturn()" data-perm="med.dispense">↩️ مرتجع دواء</button><button class="btn primary" onclick="openMedRequest()" data-perm="med.view">📨 طلب دواء من المخزن</button><button class="btn primary" onclick="openMedForm()" data-perm="med.add">+ دواء</button></div>
         </div>
         <div class="kpi-strip" id="ph-kpis"></div>
         <div id="ph-alerts"></div>
@@ -1830,12 +1830,228 @@ input[type="datetime-local"]::-webkit-date-and-time-value,input[type="date"]::-w
 <div id="toast-stack"></div>
 
 <script>
+/* Al Youssef Hospital - Supabase Gateway client (Stage 12)
+ * DB-only: no localStorage/sessionStorage, no local data fallback.
+ * Keep this object in memory only. A page reload requires a fresh employee login.
+ */
+(function (global) {
+  'use strict';
+  const CONFIG = Object.freeze({
+    supabaseUrl: 'https://pvtwhxqfabukvbzjatgw.supabase.co',
+    publishableKey: 'sb_publishable_lWJmyj2hJUaoVi9f6ROEGw_8PLqr_w9',
+    functionName: 'his-gateway'
+  });
+  let token = null;
+  let currentUser = null;
+  let revision = null;
+  let expiresAt = null;
+
+  function endpoint() {
+    return CONFIG.supabaseUrl.replace(/\/+$/, '') + '/functions/v1/' + CONFIG.functionName;
+  }
+  async function request(action, payload, options) {
+    const headers = {
+      'Content-Type': 'application/json',
+      'apikey': CONFIG.publishableKey
+    };
+    if (token && !(options && options.noSession)) headers['x-his-session'] = token;
+    if (options && options.bootstrapSecret) headers['x-his-bootstrap'] = options.bootstrapSecret;
+    const response = await fetch(endpoint(), {
+      method: 'POST',
+      mode: 'cors',
+      credentials: 'omit',
+      cache: 'no-store',
+      headers,
+      body: JSON.stringify(Object.assign({ action }, payload || {}))
+    });
+    let data;
+    try { data = await response.json(); }
+    catch (_) { throw new Error('استجابة غير مفهومة من بوابة المستشفى (' + response.status + ')'); }
+    if (!response.ok) {
+      const messages = {
+        origin_denied: 'عنوان الموقع غير مسموح له بالاتصال ببوابة المستشفى.',
+        gateway_not_configured: 'إعدادات بوابة Supabase غير مكتملة.',
+        not_bootstrapped: 'بيانات المستشفى لم تُرحّل إلى قاعدة البيانات بعد.',
+        invalid_credentials: 'اسم المستخدم أو كلمة المرور غير صحيح.',
+        password_change_required: 'الحساب يحتاج إلى تغيير كلمة المرور من مسار الإعداد المعتمد.',
+        session_expired: 'انتهت الجلسة. سجّل الدخول مرة أخرى.',
+        permission_denied: 'ليس لديك صلاحية لتنفيذ العملية.',
+        doctor_rates_update_failed: 'تعذر اعتماد نسب الطبيب على الخادم.',
+        revision_conflict: 'البيانات اتغيرت من جهاز آخر. أعد تحميلها قبل المحاولة.'
+      };
+      const err = new Error(messages[data && data.error] || ('فشل الاتصال بالبوابة: ' + (data && data.error || response.status)));
+      err.status = response.status;
+      err.code = data && data.error;
+      err.details = data;
+      throw err;
+    }
+    return data;
+  }
+  async function login(username, password) {
+    const data = await request('login', { username, password }, { noSession: true });
+    if (!data.token || !data.state || !data.user) throw new Error('بيانات تسجيل الدخول المستلمة غير مكتملة.');
+    token = data.token;
+    currentUser = data.user;
+    revision = data.revision;
+    expiresAt = data.expiresAt || null;
+    return data;
+  }
+  async function load() {
+    const data = await request('load', {});
+    if (!data.state || !Number.isFinite(Number(data.revision))) throw new Error('تحميل بيانات المستشفى غير مكتمل.');
+    revision = data.revision;
+    currentUser = data.user || currentUser;
+    return data;
+  }
+  async function saveState(state) {
+    if (!currentUser || currentUser.role !== 'admin' || !(currentUser.permissions || []).includes('*')) {
+      const err = new Error('الحفظ الشامل متاح حاليًا لحساب المدير فقط حتى اكتمال صلاحيات كل الأقسام.');
+      err.code = 'admin_only_until_fine_grained_mutations';
+      throw err;
+    }
+    if (!state || typeof state !== 'object' || Array.isArray(state)) throw new Error('بيانات الحفظ غير صالحة.');
+    const snapshot = structuredClone(state);
+    snapshot.currentUser = null;
+    const data = await request('save', { state: snapshot, expectedRevision: revision });
+    if (Number.isFinite(Number(data.revision))) revision = data.revision;
+    return data;
+  }
+  async function mutate(collection, operation, record, recordId) {
+    const data = await request('mutate', { collection, operation, record, recordId, expectedRevision: revision });
+    if (Number.isFinite(Number(data.revision))) revision = data.revision;
+    return data;
+  }
+  async function mutatePatientClinical(patientId, listKey, operation, record, reason) {
+    const data = await request('patient_clinical_mutation', { patientId, listKey, operation, record, reason: reason || '', expectedRevision: revision });
+    if (Number.isFinite(Number(data.revision))) revision = data.revision;
+    return data;
+  }
+  async function dispensePrescription(rxId, quantities, requestKey) {
+    const data = await request('pharmacy_prescription_dispense', { rxId, quantities, requestKey, expectedRevision: revision });
+    if (Number.isFinite(Number(data.revision))) revision = data.revision;
+    return data;
+  }
+  async function returnPrescription(rxId, quantities, status, reason, requestKey, settlementMode) {
+    const data = await request('pharmacy_prescription_return', { rxId, quantities, status, reason, requestKey, settlementMode: settlementMode || 'credit', expectedRevision: revision });
+    if (Number.isFinite(Number(data.revision))) revision = data.revision;
+    return data;
+  }
+  async function createPatientVisit(patient, paymentMethod, requestKey) {
+    const data = await request('create_patient_visit', { patient, paymentMethod: paymentMethod || '', requestKey, expectedRevision: revision });
+    if (Number.isFinite(Number(data.revision))) revision = data.revision;
+    return data;
+  }
+  async function createReturnVisit(patientId, visitId, doctorId, visitType, complaint, requestKey) {
+    const data = await request('create_return_visit', { patientId, visitId, doctorId, visitType, complaint: complaint || '', requestKey, expectedRevision: revision });
+    if (Number.isFinite(Number(data.revision))) revision = data.revision;
+    return data;
+  }
+  async function checkInActiveAppointment(appointmentId, patientId, visitId) {
+    const data = await request('appointment_checkin_active', { appointmentId, patientId, visitId, expectedRevision: revision });
+    if (Number.isFinite(Number(data.revision))) revision = data.revision;
+    return data;
+  }
+  async function postStayNights(patientId, requestKey) {
+    const data = await request('patient_stay_nights_post', { patientId, requestKey, expectedRevision: revision });
+    if (Number.isFinite(Number(data.revision))) revision = data.revision;
+    return data;
+  }
+  async function collectPatientInvoice(patientId, invoiceId, amount, method, requestKey) {
+    const data = await request('patient_invoice_collect', { patientId, invoiceId, amount, method, requestKey, expectedRevision: revision });
+    if (Number.isFinite(Number(data.revision))) revision = data.revision;
+    return data;
+  }
+  async function payOrStaff(operationId, staffId, amount, method, ref, requestKey) {
+    const data = await request('or_staff_payout', { operationId, staffId, amount, method, ref, requestKey, expectedRevision: revision });
+    if (Number.isFinite(Number(data.revision))) revision = data.revision;
+    return data;
+  }
+  async function updateDoctorRates(doctorId, rates, requestKey) {
+    const data = await request('doctor_rates_update', { doctorId, rates, requestKey, expectedRevision: revision });
+    if (Number.isFinite(Number(data.revision))) revision = data.revision;
+    return data;
+  }
+  async function getInventoryReconciliation() { return await request('pharmacy_inventory_reconciliation', {}); }
+  async function getChartOfAccounts() { return await request('chart_of_accounts', {}); }
+  async function getTrialBalance() {
+    return await request('journal_trial_balance', {});
+  }
+  async function updateOrDistributionRates(rates, requestKey) {
+    const data = await request('or_distribution_rates_update', { rates, requestKey, expectedRevision: revision });
+    if (Number.isFinite(Number(data.revision))) revision = data.revision;
+    return data;
+  }
+  async function approveOrDistribution(operationId, discount, nursePcts, requestKey) {
+    const data = await request('or_distribution_approve', { operationId, discount, nursePcts, requestKey, expectedRevision: revision });
+    if (Number.isFinite(Number(data.revision))) revision = data.revision;
+    return data;
+  }
+  async function settleDoctor(doctorId, month, amount, method, requestKey, overrideReason) {
+    const data = await request('doctor_monthly_settlement_pay', { doctorId, month, amount, method, requestKey, overrideReason: overrideReason || '', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Africa/Cairo', expectedRevision: revision });
+    if (Number.isFinite(Number(data.revision))) revision = data.revision;
+    return data;
+  }
+  async function approveDoctorMonth(doctorId, month, requestKey) {
+    const data = await request('doctor_monthly_settlement_approve', { doctorId, month, requestKey, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Africa/Cairo', expectedRevision: revision });
+    if (Number.isFinite(Number(data.revision))) revision = data.revision;
+    return data;
+  }
+  async function adjustDoctorMonth(doctorId, month, requestKey) {
+    const data = await request('doctor_monthly_settlement_adjust', { doctorId, month, requestKey, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Africa/Cairo', expectedRevision: revision });
+    if (Number.isFinite(Number(data.revision))) revision = data.revision;
+    return data;
+  }
+  async function previewStaySettlement(patientId) {
+    return request('patient_stay_settlement_preview', { patientId });
+  }
+  async function closeStay(patientId, requestKey) {
+    const data = await request('patient_stay_close_zero_balance', { patientId, requestKey, expectedRevision: revision });
+    if (Number.isFinite(Number(data.revision))) revision = data.revision;
+    return data;
+  }
+  async function healthCheck() {
+    return await request('health_check', {});
+  }
+  async function refreshState() {
+    const data = await load();
+    return data;
+  }
+  async function dischargePatient(patientId, exitDate, dischargeStatus, dischargeNotes) {
+    const data = await request('patient_discharge_zero_balance', { patientId, exitDate, dischargeStatus, dischargeNotes: dischargeNotes || '', expectedRevision: revision });
+    if (Number.isFinite(Number(data.revision))) revision = data.revision;
+    return data;
+  }
+  async function dischargeStay(patientId, exitDate, dischargeStatus, dischargeNotes, requestKey) {
+    const data = await request('patient_stay_discharge_zero_balance', { patientId, exitDate, dischargeStatus, dischargeNotes: dischargeNotes || '', requestKey, expectedRevision: revision });
+    if (Number.isFinite(Number(data.revision))) revision = data.revision;
+    return data;
+  }
+  async function changePassword(username, oldPassword, newPassword) {
+    return request('change_password', { username, oldPassword, newPassword }, { noSession: true });
+  }
+  async function logout() {
+    if (!token) return { ok: true };
+    try { return await request('logout', {}); }
+    finally { token = null; currentUser = null; revision = null; expiresAt = null; }
+  }
+  function clear() { token = null; currentUser = null; revision = null; expiresAt = null; }
+  function status() {
+    return { authenticated: !!token, user: currentUser, revision, expiresAt, persistence: 'memory-only' };
+  }
+  global.HospitalCloud = Object.freeze({ login, load, saveState, mutate, mutatePatientClinical, dispensePrescription, returnPrescription, createPatientVisit, createReturnVisit, checkInActiveAppointment, postStayNights, collectPatientInvoice, payOrStaff, getInventoryReconciliation, getChartOfAccounts, getTrialBalance, updateDoctorRates, updateOrDistributionRates, approveOrDistribution, settleDoctor, approveDoctorMonth, adjustDoctorMonth, previewStaySettlement, closeStay, healthCheck, refreshState, dischargePatient, dischargeStay, changePassword, logout, clear, status });
+})(window);
+
+</script>
+<script>
 // ============================================================
 // CONSTANTS & STATE
 // ============================================================
 const STORAGE_KEY='his_v3_hospital';
 const SESSION_KEY=STORAGE_KEY+'_session';
 const SESSION_TIMEOUT=4*60*60*1000; // 4 ساعات
+/* DB-ONLY MODE: منع أي قراءة/كتابة/حذف من تخزين المتصفح. */
+const __localStorageDisabled=Object.freeze({getItem:()=>null,setItem:()=>{console.warn('Local persistence disabled: Supabase gateway required');},removeItem:()=>{},clear:()=>{}});
+const __sessionStorageDisabled=Object.freeze({getItem:()=>null,setItem:()=>{console.warn('Local session persistence disabled: remote session required');},removeItem:()=>{},clear:()=>{}});
 
 
 /* ===== نظام الفترات الموحد ===== */
@@ -1940,72 +2156,76 @@ function migrateLegacyData(m){
   return m;
 }
 function loadState(){
-  let raw=null;
-  try{raw=localStorage.getItem(STORAGE_KEY);}
-  catch(e){window._storageRecovery={kind:'unavailable',message:String(e&&e.message||e),raw:null};return defaultState();}
-  if(raw){
-    let p;
-    try{p=JSON.parse(raw);}
-    catch(e){window._storageRecovery={kind:'corrupt-json',message:String(e&&e.message||e),raw};return defaultState();}
-    if(!p||typeof p!=='object'||Array.isArray(p)){
-      window._storageRecovery={kind:'invalid-root',message:'بنية البيانات الرئيسية غير صالحة',raw};return defaultState();
-    }
-    const arrayKeys=['patients','medications','prescriptions','invoices','appointments','purchases','salaries','auditLog','doctors','anesthesiologists','orStaff','rooms','users','notifications','orSchedule','payers','stockMoves','stocktakes','supplyReqs','supplierPays','purchaseOrders','cashCloses','shifts','settlements','buyReqs','services','checkoutQueue','stayRooms','stays','stayEvents','payroll'];
-    const invalid=arrayKeys.filter(k=>Object.prototype.hasOwnProperty.call(p,k)&&!Array.isArray(p[k]));
-    if(invalid.length){window._storageRecovery={kind:'invalid-collections',message:'حقول بيانات أساسية غير صالحة: '+invalid.join('، '),raw};return defaultState();}
-    try{
-      const def=defaultState();
-      const m=Object.assign(def,p);
-      ['patients','medications','prescriptions','invoices','appointments','purchases','salaries','auditLog','doctors','anesthesiologists','orStaff','rooms','users','notifications','orSchedule','payers','stockMoves','stocktakes','supplyReqs','supplierPays','purchaseOrders','cashCloses','shifts','settlements','buyReqs','services','checkoutQueue','stayRooms','stays','stayEvents','payroll'].forEach(k=>{if(!Array.isArray(m[k])) m[k]=def[k]||[];});
-      if(!m.notifiedEvents||typeof m.notifiedEvents!=='object') m.notifiedEvents={};
-      if(!m.roomTypes) m.roomTypes=defaultState().roomTypes;
-      m.patients.forEach(p=>{['journey','allergies','chronicDiseases','diagnoses','vitals','labs','notes'].forEach(k=>{if(!Array.isArray(p[k])) p[k]=[];});if(!p.gender) p.gender='';if(!p.dob) p.dob='';if(!Array.isArray(p.visits)) p.visits=[];if(p.payerId===undefined) p.payerId='py3';if(p.visitType===undefined) p.visitType='كشف';if(p.triage===undefined) p.triage=0;});
-      m.invoices.forEach(inv=>{if(!inv.visitKey){const _q=m.patients.find(x=>x.id===inv.patientId);if(_q&&!(_q.visits&&_q.visits.length)) inv.visitKey=_q.entryDate;}if(!Array.isArray(inv.payments)) inv.payments=[];if(!inv.createdAt) inv.createdAt=new Date().toISOString();});
-      (m.prescriptions||[]).forEach(rx=>{(rx.items||[]).forEach(it=>{if(it.unitPrice===undefined){const med=(m.medications||[]).find(x=>x.id===it.medicineId);it.unitPrice=med?(med.price||0):0;}});});
-      if((p.schemaVersion||0)<11){/* V11 ترحيل مرة واحدة: توثيق أرصدة افتتاحية للدفعات صراحةً بدل التسوية الصامتة أثناء القراءة */
-        (m.medications||[]).forEach(med=>{try{if(stockDiffOf(med).length){const _s=state;state=m;reconcileBApply(med,'migration-v11');state=_s;}}catch(e){console.error('mig',e);}});
-        m.schemaVersion=11;m.cashLedgerStart=m.cashLedgerStart||new Date().toISOString();m.cashMovements=m.cashMovements||[];m.migrationLog=(m.migrationLog||[]);m.migrationLog.push({v:11,at:new Date().toISOString(),note:'أرصدة افتتاحية موثقة للأصناف بلا دفعات'});
-      }
-      migrateLegacyData(m);
-      return m;
-    }catch(e){
-      console.error('State normalization failed:',e);
-      window._storageRecovery={kind:'normalization-error',message:String(e&&e.message||e),raw};
-      return defaultState();
-    }
-  }
+  // The only operational state is assigned after successful Supabase login/load.
   return defaultState();
 }
 function renderStorageRecovery(){
   const r=window._storageRecovery;if(!r)return false;
-  const title=r.kind==='unavailable'?'تعذر الوصول إلى التخزين المحلي':'تم إيقاف التشغيل لحماية بياناتك';
-  const detail=esc(r.message||'سبب غير معروف');
-  document.body.innerHTML=`<main dir="rtl" style="min-height:100vh;display:grid;place-items:center;padding:22px;background:#f1f5f9;font-family:Cairo,sans-serif;color:#0f172a"><section style="width:min(620px,100%);background:#fff;border:1px solid #e2e8f0;border-radius:18px;padding:26px;box-shadow:0 18px 45px #0f172a18"><div style="font-size:38px;margin-bottom:12px">🛡️</div><h1 style="font-size:21px;margin-bottom:10px">${title}</h1><p style="line-height:1.9;color:#475569;margin-bottom:12px">${detail}</p><p style="line-height:1.9;color:#475569;margin-bottom:18px">لم يتم تحميل قاعدة افتراضية داخل التطبيق، ولن يتم حفظ بيانات جديدة فوق المحتوى الموجود. ده إجراء حماية لمنع فقدان سجلات المرضى والحسابات والحركات المالية.</p><div style="display:flex;gap:9px;flex-wrap:wrap"><button id="recovery-export" style="border:0;border-radius:9px;padding:12px 16px;background:#0f766e;color:#fff;font:700 14px Cairo;cursor:pointer" ${r.raw===null?'disabled':''}>تنزيل ملف البيانات الخام</button><button onclick="location.reload()" style="border:1px solid #cbd5e1;border-radius:9px;padding:12px 16px;background:#fff;color:#334155;font:700 14px Cairo;cursor:pointer">إعادة المحاولة</button></div><small style="display:block;color:#64748b;margin-top:16px">ما تعملش مسح لبيانات المتصفح أو تعيد ضبط التطبيق قبل الاحتفاظ بنسخة من الملف.</small></section></main>`;
-  document.getElementById('recovery-export')?.addEventListener('click',()=>{try{const blob=new Blob([r.raw],{type:'application/json;charset=utf-8'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='hospital_recovery_raw_'+Date.now()+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1500);}catch(e){alert('تعذر تنزيل البيانات الخام: '+(e.message||e));}});
+  document.body.innerHTML=`<main dir="rtl" style="min-height:100vh;display:grid;place-items:center;padding:22px;background:#f1f5f9;font-family:Cairo,sans-serif;color:#0f172a"><section style="width:min(680px,100%);background:#fff;border:1px solid #e2e8f0;border-radius:18px;padding:28px;box-shadow:0 18px 45px #0f172a18"><div style="font-size:42px;margin-bottom:12px">☁️</div><h1 style="font-size:22px;margin-bottom:12px">التشغيل السحابي مطلوب</h1><p style="line-height:2;color:#475569;margin-bottom:12px">تم تفعيل وضع قاعدة البيانات فقط. التطبيق لن يقرأ أو يحفظ أو يعدّل بيانات التشغيل على هذا الجهاز.</p><p style="line-height:2;color:#475569;margin-bottom:12px">لن يتم فتح الأقسام أو قبول تعديلات قبل اكتمال بوابة Supabase الآمنة وتحميل بيانات المستشفى منها. ده يمنع فقدان التعديلات أو ظهور بيانات تجريبية بدل البيانات الحقيقية.</p><div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:12px;color:#1e40af;font-size:13px;line-height:1.9">بياناتك المحلية القديمة لم يتم حذفها أو تعديلها، لكن النسخة دي لن تستخدمها. بعد تجهيز الربط هننقلها للسحابة بخطوة ترحيل منفصلة ومتحقق منها.</div><div style="margin-top:18px;font-size:12px;color:#64748b">الحالة: DB-only مفعل · بوابة Supabase غير مهيأة بعد</div></section></main>`;
   return true;
 }
 let _saveTimer=null;
-function save(){if(_saveTimer)clearTimeout(_saveTimer);_saveTimer=setTimeout(_saveNow,200);}
-function _flushSave(){if(_saveTimer){clearTimeout(_saveTimer);_saveNow();}}
-window.addEventListener('beforeunload',_flushSave);
-window.addEventListener('pagehide',_flushSave);
-document.addEventListener('visibilitychange',()=>{if(document.hidden)_flushSave();});
-function _saveNow(){
-  _saveTimer=null;
-  if(window._storageRecovery){console.error('Save blocked: storage recovery mode is active');return;}
-  try{const _persist={...state,currentUser:null};localStorage.setItem(STORAGE_KEY,JSON.stringify(_persist));return;}
-  catch(e){
-    if(!(e&&(e.name==='QuotaExceededError'||/quota/i.test(e.message||'')))){toastError('⚠️ تعذر الحفظ');return;}
+let _saveInFlight=false;
+let _saveAgain=false;
+let _saveVersion=0;
+let _saveBlocked=false;
+function save(){
+  // Calls made during boot/login are not user edits and must not trigger unload warnings.
+  if(!window._cloudBootstrapped || !state || !state.currentUser){
+    console.warn('Cloud save ignored: no authenticated cloud state.');
+    return false;
   }
-  /* V11: ممنوع حذف الإشعارات أو سجل التدقيق تلقائياً عند امتلاء التخزين — تنزيل نسخة طوارئ فقط */
-  try{
-    const blob=new Blob([JSON.stringify({...state,currentUser:null})],{type:'application/json'});
-    const a=document.createElement('a');a.href=URL.createObjectURL(blob);
-    a.download='emergency_backup_'+todayISO()+'_'+Date.now()+'.json';a.click();
-    toastError('⚠️ مساحة التخزين امتلأت — تم تنزيل نسخة طوارئ. احذف بيانات قديمة.');
-  }catch(e3){toastError('⚠️ مساحة التخزين امتلأت! الحفظ فشل.');}
+  if(!state.currentUser.permissions?.includes('*')){
+    _saveBlocked=true;
+    window._cloudSaveError='الحفظ الشامل غير متاح لهذا الدور حتى اكتمال مسارات الحفظ الخاصة به.';
+    console.warn(window._cloudSaveError);
+    return false;
+  }
+  _saveVersion++;
+  window._cloudWritePending=true;
+  clearTimeout(_saveTimer);
+  _saveTimer=setTimeout(_flushSave,650);
+  return true;
 }
 
+async function _flushSave(){
+  if(_saveInFlight){_saveAgain=true;return;}
+  if(!window._cloudBootstrapped || !state?.currentUser?.permissions?.includes('*')) return;
+  _saveInFlight=true;
+  _saveAgain=false;
+  const versionAtStart=_saveVersion;
+  const snapshot=structuredClone(state);
+  try{
+    const result=await HospitalCloud.saveState(snapshot);
+    window._cloudSaveError=null;
+    if(result&&Number.isFinite(Number(result.revision))) window._cloudRevision=result.revision;
+    // Do not clear the dirty flag if edits arrived while this snapshot was in flight.
+    if(_saveVersion===versionAtStart) window._cloudWritePending=false;
+    else _saveAgain=true;
+  }catch(e){
+    window._cloudWritePending=true;
+    window._cloudSaveError=e.message||'فشل الحفظ السحابي';
+    console.error('Cloud save failed:',e);
+    if(e.code==='revision_conflict'){
+      _saveBlocked=true;
+      _saveAgain=false;
+      toastWarn('البيانات اتغيرت من جهاز آخر. أعد تحميل الصفحة وسجّل الدخول قبل أي تعديل جديد.');
+    }else{
+      toastWarn('لم يتم تأكيد الحفظ السحابي: '+window._cloudSaveError);
+    }
+  }finally{
+    _saveInFlight=false;
+    if(_saveAgain && !_saveBlocked && window._cloudBootstrapped){
+      _saveAgain=false;
+      clearTimeout(_saveTimer);
+      _saveTimer=setTimeout(_flushSave,150);
+    }
+  }
+}
+window.addEventListener('beforeunload',(e)=>{if(window._cloudWritePending){e.preventDefault();e.returnValue='هناك تغييرات لم يتم تأكيد حفظها سحابيًا.';}});
+window.addEventListener('pagehide',()=>{if(window._cloudWritePending && !_saveInFlight) _flushSave();});
+document.addEventListener('visibilitychange',()=>{});
+function _saveNow(){console.warn('Local save disabled; remote persistence required.');}
 // HELPERS
 const pad=n=>String(n).padStart(2,'0');
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
@@ -2177,9 +2397,9 @@ function hasAccess(pageId){const p = PAGES.find(x=>x.id===pageId);return p ? pag
 function firstPage(){if(!state.currentUser) return null;for(const p of PAGES){if(pageOk(p)) return p.id;}return null;}
 
 let sessionTimer=null;
-function _readSession(){try{const x=JSON.parse(sessionStorage.getItem(SESSION_KEY)||'null');if(!x||typeof x!=='object'||!x.userId||!Number.isFinite(+x.lastActivity)) return null;if(Date.now()-Number(x.lastActivity)>SESSION_TIMEOUT){sessionStorage.removeItem(SESSION_KEY);return null;}const u=(state.users||[]).find(z=>z.id===x.userId);if(!u||u.disabled||!u.password||u.mustChangePassword||(u.role==='doctor'&&!u.doctorId)){sessionStorage.removeItem(SESSION_KEY);return null;}return {id:u.id,name:u.name,username:u.username,role:u.role,permissions:[...(u.permissions||[])],doctorId:u.doctorId||''};}catch(e){try{sessionStorage.removeItem(SESSION_KEY);}catch(_){}return null;}}
-function _writeSession(){if(!state||!state.currentUser)return false;try{sessionStorage.setItem(SESSION_KEY,JSON.stringify({userId:state.currentUser.id,lastActivity:Date.now()}));return true;}catch(e){return false;}}
-function _clearSession(){try{sessionStorage.removeItem(SESSION_KEY);}catch(e){}try{localStorage.removeItem(STORAGE_KEY+'_la');}catch(e){}}
+function _readSession(){try{const x=JSON.parse(__sessionStorageDisabled.getItem(SESSION_KEY)||'null');if(!x||typeof x!=='object'||!x.userId||!Number.isFinite(+x.lastActivity)) return null;if(Date.now()-Number(x.lastActivity)>SESSION_TIMEOUT){__sessionStorageDisabled.removeItem(SESSION_KEY);return null;}const u=(state.users||[]).find(z=>z.id===x.userId);if(!u||u.disabled||!u.password||u.mustChangePassword||(u.role==='doctor'&&!u.doctorId)){__sessionStorageDisabled.removeItem(SESSION_KEY);return null;}return {id:u.id,name:u.name,username:u.username,role:u.role,permissions:[...(u.permissions||[])],doctorId:u.doctorId||''};}catch(e){try{__sessionStorageDisabled.removeItem(SESSION_KEY);}catch(_){}return null;}}
+function _writeSession(){if(!state||!state.currentUser)return false;try{__sessionStorageDisabled.setItem(SESSION_KEY,JSON.stringify({userId:state.currentUser.id,lastActivity:Date.now()}));return true;}catch(e){return false;}}
+function _clearSession(){try{__sessionStorageDisabled.removeItem(SESSION_KEY);}catch(e){}try{__localStorageDisabled.removeItem(STORAGE_KEY+'_la');}catch(e){}}
 function resetSession(){clearTimeout(sessionTimer);if(state&&state.currentUser&&Date.now()-(window._sessionWriteAt||0)>10000){window._sessionWriteAt=Date.now();_writeSession();}sessionTimer=setTimeout(()=>{if(state&&state.currentUser){doLogout(true);toastWarn('⏱️ انتهت الجلسة');}},SESSION_TIMEOUT);} 
 ['click','keydown','mousemove'].forEach(ev=>document.addEventListener(ev,resetSession,{passive:true}));
 
@@ -2208,46 +2428,92 @@ async function hashPw(u,p,salt){
 }
 async function hashPwLegacy(u,p,salt){const s='hosp|'+u+'|'+(salt||'')+'|'+p;try{const b=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(s));return 'h:'+[...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('');}catch(e){let h=5381;for(const c of s)h=((h<<5)+h+c.charCodeAt(0))>>>0;return 'h:'+h.toString(16);}}
 const _lockKey='his_login_lock';
-function _loadLocks(){try{return JSON.parse(localStorage.getItem(_lockKey)||'{}');}catch(e){return {};}}
-function _saveLocks(o){try{localStorage.setItem(_lockKey,JSON.stringify(o));}catch(e){}}
+function _loadLocks(){try{return JSON.parse(__localStorageDisabled.getItem(_lockKey)||'{}');}catch(e){return {};}}
+function _saveLocks(o){try{__localStorageDisabled.setItem(_lockKey,JSON.stringify(o));}catch(e){}}
+let _cloudMonitorTimer=null;
+let _cloudMonitorBusy=false;
+function ensureCloudMonitorUI(){
+  if(document.getElementById('cloud-sync-monitor')) return;
+  const el=document.createElement('div');el.id='cloud-sync-monitor';
+  el.style.cssText='position:fixed;z-index:9998;bottom:14px;left:14px;display:flex;align-items:center;gap:8px;padding:8px 11px;border:1px solid #cbd5e1;border-radius:12px;background:#fff;color:#0f172a;box-shadow:0 4px 18px #0f172a18;font:700 12px Cairo,sans-serif;direction:rtl';
+  el.innerHTML='<span id="cloud-sync-dot" style="width:9px;height:9px;border-radius:50%;background:#94a3b8"></span><span id="cloud-sync-label">فحص اتصال قاعدة البيانات</span><button id="cloud-sync-reload" style="display:none;border:0;border-radius:7px;padding:5px 8px;background:#b91c1c;color:#fff;font:700 11px Cairo,sans-serif;cursor:pointer">إعادة تحميل آمنة</button>';
+  document.body.appendChild(el);
+  el.querySelector('#cloud-sync-reload').onclick=()=>{if(window._cloudWritePending){toastWarn('فيه تغييرات لم يتم تأكيد حفظها. لا يمكن إعادة التحميل بأمان الآن.');return;}location.reload();};
+}
+function setCloudMonitor(mode,label,showReload){
+  ensureCloudMonitorUI();const dot=document.getElementById('cloud-sync-dot'),txt=document.getElementById('cloud-sync-label'),btn=document.getElementById('cloud-sync-reload');
+  if(txt)txt.textContent=label;
+  if(dot)dot.style.background=mode==='ok'?'#16a34a':mode==='stale'?'#dc2626':'#d97706';
+  if(btn)btn.style.display=showReload?'':'none';
+}
+async function checkCloudRevision(){
+  if(_cloudMonitorBusy||!window._cloudBootstrapped||!window.HospitalCloud?.status().authenticated)return;
+  _cloudMonitorBusy=true;
+  try{
+    const h=await HospitalCloud.healthCheck();
+    const local=Number(HospitalCloud.status().revision||window._cloudRevision||0),remote=Number(h.revision||0);
+    if(remote>local){
+      window._cloudRemoteChanged=true;_saveBlocked=true;
+      setCloudMonitor('stale','تغييرات أحدث على جهاز آخر — يلزم تحديث الصفحة',true);
+      if(!window._cloudRemoteChangeWarned){window._cloudRemoteChangeWarned=true;toastWarn('قاعدة البيانات اتحدثت من جهاز آخر. أوقفنا الحفظ العام لتجنب الكتابة فوق بيانات أحدث. راجع التغييرات ثم أعد تحميل الصفحة.');}
+    }else if(remote===local){setCloudMonitor('ok','متصل بقاعدة البيانات · إصدار '+remote,false);}
+    else {setCloudMonitor('warn','رقم الإصدار المحلي أحدث؛ أعد تسجيل الدخول للتحقق',false);}
+  }catch(e){setCloudMonitor('warn','تعذر التحقق من اتصال قاعدة البيانات',false);console.warn('Cloud health check failed:',e);}
+  finally{_cloudMonitorBusy=false;}
+}
+function startCloudMonitor(){
+  clearInterval(_cloudMonitorTimer);ensureCloudMonitorUI();
+  setCloudMonitor('warn','جاري التحقق من قاعدة البيانات…',false);
+  checkCloudRevision();_cloudMonitorTimer=setInterval(checkCloudRevision,20000);
+}
+
 async function doLogin(){
   const u=document.getElementById('login-user').value.trim();
   const p=document.getElementById('login-pass').value;
   const err=document.getElementById('login-err');
-  const uname=u||'_';
-  if(!u||!p){err.textContent='أدخل اسم المستخدم وكلمة المرور';err.classList.add('show');return;} /* V11-SEC-001: لا استثناءات دخول قديمة */
-  const _locks=_loadLocks();const _L=_locks[uname]||{fails:0,until:0};
-  if(Date.now()<_L.until){err.textContent='⛔ محاولات كثيرة — انتظر 5 دقائق';err.classList.add('show');return;}
-  const user=state.users.find(x=>x.username===u);
-  let ok=false;
-  if(!adminConfigured()){startFirstRunIfNeeded();err.textContent='🔐 تثبيت جديد: أكمل إنشاء كلمة مرور المدير أولاً';err.classList.add('show');return;}
-  if(user&&(user.disabled||!user.password)){err.textContent='⛔ الحساب غير مفعّل — راجع المدير';err.classList.add('show');return;}
-  if(user&&p){
-    const stored=String(user.password||'');
-    if(stored.startsWith('pbkdf2:')){ok=(await hashPw(u,p,user.passwordSalt))===stored;}
-    else if(stored.startsWith('h:')){
-      ok=(await hashPwLegacy(u,p,user.passwordSalt))===stored;
-      if(ok){user.password=await hashPw(u,p,user.passwordSalt);} // ترقية البصمة القديمة تلقائياً
-    }
-    else{ok=stored===p;} // نص صريح قديم — يُجزّأ أدناه عند أول دخول ناجح
-  }
-  if(!user||!ok){
-    _L.fails++;if(_L.fails>=5){_L.until=Date.now()+5*60*1000;_L.fails=0;}
-    _locks[uname]=_L;_saveLocks(_locks);
-    err.textContent='❌ بيانات دخول غير صحيحة';err.classList.add('show');return;
-  }
-  delete _locks[uname];_saveLocks(_locks);
-  if(user.role==='doctor'&&!user.doctorId){err.textContent='⛔ حساب الطبيب غير مربوط بطبيب — راجع المدير';err.classList.add('show');return;}
-  // أول دخول: فرض تغيير كلمة المرور قبل الدخول (لا تُنشأ جلسة قبل التغيير)
-  if(user.mustChangePassword){
-    err.textContent='🔐 هذه أول مرة — يجب تغيير كلمة المرور قبل الدخول';err.classList.add('show');
-    setTimeout(()=>forceChangePassword(user.id),100);
-    return;
-  }
-  if(!user.passwordSalt){user.passwordSalt=(crypto.randomUUID?crypto.randomUUID():String(Date.now())+Math.random().toString(16).slice(2));user.password=await hashPw(u,p,user.passwordSalt);}
+  const btn=document.querySelector('.login-btn');
+  if(!u||!p){err.textContent='أدخل اسم المستخدم وكلمة المرور';err.classList.add('show');return;}
+  if(!window.HospitalCloud){err.textContent='عميل الاتصال السحابي غير محمّل.';err.classList.add('show');return;}
+  if(btn){btn.disabled=true;btn.textContent='جاري الاتصال بالسحابة…';}
   err.classList.remove('show');
-  state.currentUser={id:user.id,name:user.name,username:user.username,role:user.role,permissions:[...(user.permissions||[])],doctorId:user.doctorId||''};
-  _writeSession();save();enterApp();resetSession();
+  try{
+    const auth=await HospitalCloud.login(u,p);
+    const loaded=await HospitalCloud.load();
+    if(!loaded||!loaded.state||!loaded.user) throw new Error('لم تكتمل قراءة بيانات المستشفى من قاعدة البيانات.');
+    if(loaded.user.role!=='admin'||!(loaded.user.permissions||[]).includes('*')){
+      HospitalCloud.clear();
+      throw new Error('نسخة الدمج الحالية مخصصة لحساب المدير فقط. حسابات الموظفين لن تُفتح قبل اكتمال مسارات حفظ كل قسم حسب الصلاحيات.');
+    }
+    const defaults=defaultState();
+    const cloudState=loaded.state;
+    // Admin receives the full server state. Merge only missing shape defaults; never read device data.
+    state=Object.assign(defaults,cloudState);
+    state.currentUser={
+      id:loaded.user.id,name:loaded.user.name,username:loaded.user.username,
+      role:loaded.user.role,permissions:[...(loaded.user.permissions||[])],
+      doctorId:loaded.user.doctorId||''
+    };
+    window._cloudBootstrapped=true;
+    window._cloudRevision=Number(loaded.revision||0);
+    window._cloudRemoteChanged=false;window._cloudRemoteChangeWarned=false;
+    window._cloudWritePending=false;
+    window._cloudSaveError=null;
+    _saveBlocked=false;_saveAgain=false;_saveVersion=0;
+    ensureRooms();
+    document.getElementById('login-hosp').textContent=state.hospitalName||'مستشفى الـ يوسف';
+    err.classList.remove('show');
+    if(typeof initPasswordEnhancements==='function') initPasswordEnhancements();
+    enterApp();
+    resetSession();
+    startCloudMonitor();
+  }catch(e){
+    console.error('Cloud login/load failed:',e);
+    err.textContent=e.message||'تعذر تسجيل الدخول أو تحميل البيانات السحابية.';
+    err.classList.add('show');
+    try{HospitalCloud.clear();}catch(_){}
+  }finally{
+    if(btn){btn.disabled=false;btn.textContent='دخول النظام';}
+  }
 }
 async function forceChangePassword(userId,firstRun){
   const ov=openModal({
@@ -2277,7 +2543,7 @@ async function forceChangePassword(userId,firstRun){
     save();enterApp();resetSession();
   });
 }
-async function doLogout(skip){
+async function doLogout(skip){clearInterval(_cloudMonitorTimer);_cloudMonitorTimer=null;document.getElementById('cloud-sync-monitor')?.remove();window._cloudRemoteChanged=false;window._cloudRemoteChangeWarned=false;
   if(!skip && !await appConfirm('تسجيل الخروج؟')) return;
   clearTimeout(sessionTimer);stopNotifWatcher();_clearSession();
   state.currentUser=null;save();
@@ -2298,7 +2564,7 @@ function enterApp(){setTimeout(()=>{try{takeSnapshot();checkBackupReminder();}ca
   document.getElementById('topbar-title').textContent=state.hospitalName;
   ensureRooms();buildNav();applyPermVisibility();
   let fp=firstPage();
-  try{let last=localStorage.getItem(STORAGE_KEY+'_lastPage');if(last==='stay'){last='rooms';state.roomsTab='stay';}if(last==='operationsRooms'){last='rooms';state.roomsTab='or';}if(last&&hasAccess(last)) fp=last;}catch(e){}
+  try{let last=__localStorageDisabled.getItem(STORAGE_KEY+'_lastPage');if(last==='stay'){last='rooms';state.roomsTab='stay';}if(last==='operationsRooms'){last='rooms';state.roomsTab='or';}if(last&&hasAccess(last)) fp=last;}catch(e){}
   if(fp) navigateTo(fp);else toastWarn('لا صلاحية');
   startNotifWatcher();
 }
@@ -2336,7 +2602,7 @@ function navigateTo(page){
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
   const t=document.getElementById('page-'+page);
   if(t) t.classList.add('active');
-  try{localStorage.setItem(STORAGE_KEY+'_lastPage',page);}catch(e){}
+  try{__localStorageDisabled.setItem(STORAGE_KEY+'_lastPage',page);}catch(e){}
   document.getElementById('sidebar').classList.remove('open');
   document.getElementById('overlay-bg').classList.remove('show');
   const pg=PAGES.find(p=>p.id===page);
@@ -2842,7 +3108,30 @@ function finishFlow(pid,action){
 async function endStayOnly(pid){
   if(!requirePerm('room.book')) return;
   const p=getPatient(pid);if(!p||!p.stayRoom||p.status!=='active') return;
-  if(!await appConfirm('إنهاء الإقامة بدون خروج المريض؟')) return;
+  if(!await appConfirm('إنهاء الإقامة بدون خروج المريض؟ سيتم ترحيل الليالي المستحقة أولاً، ولازم تكون كل الفواتير مسددة قبل تحرير الغرفة.')) return;
+  if(window._cloudBootstrapped && window.HospitalCloud?.status().authenticated){
+    try{
+      const preview=await HospitalCloud.previewStaySettlement(pid);
+      if(!preview?.ok) throw new Error('تعذر معاينة تسوية الإقامة من الخادم');
+      const postKey='stay-post:'+String(p.stayId)+':'+String(preview.nights);
+      if((preview.missingNights||[]).length){
+        await HospitalCloud.postStayNights(pid,postKey);
+      }
+      const refreshed=await HospitalCloud.refreshState();
+      if(!refreshed?.state) throw new Error('تعذر تحديث بيانات الفواتير بعد ترحيل الليالي');
+      state=Object.assign(defaultState(),refreshed.state);
+      state.currentUser={id:refreshed.user.id,name:refreshed.user.name,username:refreshed.user.username,role:refreshed.user.role,permissions:[...(refreshed.user.permissions||[])],doctorId:refreshed.user.doctorId||''};
+      const due=roundMoney((state.invoices||[]).filter(i=>String(i.patientId)===String(pid)).reduce((a,i)=>a+Math.max(0,Number(i.total||0)-Number(i.paid||0)),0));
+      if(due>0.009){renderAll();toastWarn('تم ترحيل ليالي الإقامة. متبقي '+fmtMoney(due)+'؛ حصّله من شاشة الفواتير ثم أعد إنهاء الإقامة. لم يتم تحرير الغرفة.');return;}
+      const result=await HospitalCloud.closeStay(pid,'stay-close:'+String(p.stayId));
+      if(!result?.ok||!result.patient||!result.stay) throw new Error('الخادم لم يؤكد إنهاء الإقامة');
+      const refreshed2=await HospitalCloud.refreshState();
+      if(!refreshed2?.state) throw new Error('تم إنهاء الإقامة على الخادم لكن تعذر تحديث الشاشة؛ أعد تحميل البيانات');
+      state=Object.assign(defaultState(),refreshed2.state);
+      state.currentUser={id:refreshed2.user.id,name:refreshed2.user.name,username:refreshed2.user.username,role:refreshed2.user.role,permissions:[...(refreshed2.user.permissions||[])],doctorId:refreshed2.user.doctorId||''};
+      renderAll();document.querySelectorAll('.pp-overlay').forEach(o=>o.remove());openPatientProfile(pid);toastSuccess('تم إنهاء الإقامة وتحرير الغرفة للتنظيف بعد تأكيد الخادم');return;
+    }catch(e){toastError(e.message||'فشل إنهاء الإقامة السحابي؛ لم يتم تحرير الغرفة');return;}
+  }
   accrueStay(p);releaseStay(p,'end');
   logAction('إنهاء إقامة',p.name,'');
   save();renderAll();
@@ -3353,43 +3642,43 @@ function renderAppts(){
     applyPermVisibility(tl);
   }catch(e){console.error('appts',e);}
 }
-function openApptForm(editId,prefillPatientId){const edit=!!editId;if(!requirePerm(edit?'appt.edit':'appt.add')) return;const a=edit?state.appointments.find(x=>x.id===editId):null;if(!state.doctors.length){toastWarn('أضف طبيب أولاً');return;}let prefillName='',prefillPhone='',prefillDoctorId='';if(prefillPatientId){const pp=getPatient(prefillPatientId);if(pp){prefillName=pp.name;prefillPhone=pp.phone||'';prefillDoctorId=pp.doctorId;}}const docOpts=state.doctors.map(d=>`<option value="${d.id}" ${(edit&&a.doctorId===d.id)||(!edit&&prefillDoctorId===d.id)?'selected':''}>${esc(d.name)}</option>`).join('');orSyncRooms();const _R=['كشف','عملية','استشارة'];const _cur=edit?(a.reason||'كشف'):'كشف';const _rOpts=(_R.includes(_cur)?_R:[_cur,..._R]).map(r=>`<option value="${esc(r)}" ${r===_cur?'selected':''}>${esc(r)}</option>`).join('');const body=`<form id="af"><div class="form-grid"><div class="field full"><label>المريض</label><input id="af-name" value="${edit?esc(a.patientName):esc(prefillName)}"></div><div class="field"><label>الهاتف</label><input id="af-phone" value="${edit?esc(a.phone||''):esc(prefillPhone)}"></div><div class="field"><label>التاريخ</label><input type="datetime-local" id="af-date" value="${edit?toLocal(new Date(a.date)):getApptDate()+'T09:00'}"></div><div class="field full"><label>السبب *</label><select id="af-r">${_rOpts}</select></div><div class="field full"><label id="af-doc-l">الطبيب</label><select id="af-doc">${docOpts}</select></div><div class="field af-opf" style="display:none"><label>اسم العملية</label><input id="af-proc" value="${edit?esc(a.procedure||''):''}"></div><div class="field af-opf" style="display:none"><label>غرفة العمليات</label><select id="af-orr"><option value="">— حسب التوفر —</option>${OR_ROOMS.map(r=>`<option value="${esc(r)}" ${edit&&a.orRoom===r?'selected':''}>${esc(r)}</option>`).join('')}</select></div></div><div style="display:flex;gap:10px;margin-top:14px"><button type="submit" class="btn primary">💾</button><button type="button" class="btn ghost" data-close>إلغاء</button></div></form>`;const ov=openModal({title:edit?'✏️ تعديل':'📅 موعد جديد',body});const _sync=()=>{const op=ov.querySelector('#af-r').value==='عملية';ov.querySelectorAll('.af-opf').forEach(x=>x.style.display=op?'':'none');ov.querySelector('#af-doc-l').textContent=op?'الجراح':'الطبيب';};ov.querySelector('#af-r').addEventListener('change',_sync);_sync();ov.querySelector('#af').addEventListener('submit',e=>{e.preventDefault();const _rsn=ov.querySelector('#af-r').value,_op=_rsn==='عملية';const name=ov.querySelector('#af-name').value.trim();const dateVal=ov.querySelector('#af-date').value;if(!name||!dateVal){toastWarn('أكمل');return;}const doc=getDoctor(ov.querySelector('#af-doc').value);const newDate=new Date(dateVal);const clash=state.appointments.find(x=>x.id!==(a&&a.id)&&x.doctorId===doc.id&&x.status!=='cancelled'&&Math.abs(new Date(x.date)-newDate)<20*60000);if(clash){toastError('⚠️ للطبيب موعد آخر في نفس الوقت: '+clash.patientName);return;}if(edit){Object.assign(a,{patientName:name,phone:ov.querySelector('#af-phone').value.trim(),date:newDate.toISOString(),doctorId:doc.id,doctorName:doc.name,reason:_rsn,apptType:_op?'surgery':(_rsn==='استشارة'?'consult':'exam'),procedure:_op?ov.querySelector('#af-proc').value.trim():'',orRoom:_op?ov.querySelector('#af-orr').value:''});toastSuccess('تم');}else{state.appointments.push({id:'a'+uid(),patientId:'',patientRef:(prefillPatientId&&getPatient(prefillPatientId)&&normName(getPatient(prefillPatientId).name)===normName(name))?prefillPatientId:'',patientName:name,phone:ov.querySelector('#af-phone').value.trim(),date:newDate.toISOString(),doctorId:doc.id,doctorName:doc.name,status:'confirmed',reason:_rsn,apptType:_op?'surgery':(_rsn==='استشارة'?'consult':'exam'),procedure:_op?ov.querySelector('#af-proc').value.trim():'',orRoom:_op?ov.querySelector('#af-orr').value:'',createdAt:new Date().toISOString()});toastSuccess('تم');}save();ov.remove();renderAll();});}
+function openApptForm(editId,prefillPatientId){const edit=!!editId;if(!requirePerm(edit?'appt.edit':'appt.add')) return;const a=edit?state.appointments.find(x=>x.id===editId):null;if(!state.doctors.length){toastWarn('أضف طبيب أولاً');return;}let prefillName='',prefillPhone='',prefillDoctorId='';if(prefillPatientId){const pp=getPatient(prefillPatientId);if(pp){prefillName=pp.name;prefillPhone=pp.phone||'';prefillDoctorId=pp.doctorId;}}const docOpts=state.doctors.map(d=>`<option value="${d.id}" ${(edit&&a.doctorId===d.id)||(!edit&&prefillDoctorId===d.id)?'selected':''}>${esc(d.name)}</option>`).join('');orSyncRooms();const _R=['كشف','عملية','استشارة'];const _cur=edit?(a.reason||'كشف'):'كشف';const _rOpts=(_R.includes(_cur)?_R:[_cur,..._R]).map(r=>`<option value="${esc(r)}" ${r===_cur?'selected':''}>${esc(r)}</option>`).join('');const body=`<form id="af"><div class="form-grid"><div class="field full"><label>المريض</label><input id="af-name" value="${edit?esc(a.patientName):esc(prefillName)}"></div><div class="field"><label>الهاتف</label><input id="af-phone" value="${edit?esc(a.phone||''):esc(prefillPhone)}"></div><div class="field"><label>التاريخ</label><input type="datetime-local" id="af-date" value="${edit?toLocal(new Date(a.date)):getApptDate()+'T09:00'}"></div><div class="field full"><label>السبب *</label><select id="af-r">${_rOpts}</select></div><div class="field full"><label id="af-doc-l">الطبيب</label><select id="af-doc">${docOpts}</select></div><div class="field af-opf" style="display:none"><label>اسم العملية</label><input id="af-proc" value="${edit?esc(a.procedure||''):''}"></div><div class="field af-opf" style="display:none"><label>غرفة العمليات</label><select id="af-orr"><option value="">— حسب التوفر —</option>${OR_ROOMS.map(r=>`<option value="${esc(r)}" ${edit&&a.orRoom===r?'selected':''}>${esc(r)}</option>`).join('')}</select></div></div><div style="display:flex;gap:10px;margin-top:14px"><button type="submit" class="btn primary">💾</button><button type="button" class="btn ghost" data-close>إلغاء</button></div></form>`;const ov=openModal({title:edit?'✏️ تعديل':'📅 موعد جديد',body});const _sync=()=>{const op=ov.querySelector('#af-r').value==='عملية';ov.querySelectorAll('.af-opf').forEach(x=>x.style.display=op?'':'none');ov.querySelector('#af-doc-l').textContent=op?'الجراح':'الطبيب';};ov.querySelector('#af-r').addEventListener('change',_sync);_sync();ov.querySelector('#af').addEventListener('submit',async e=>{e.preventDefault();if(ov._busy)return;ov._busy=true;const submit=ov.querySelector('#af button[type=submit]');if(submit)submit.disabled=true;try{const _rsn=ov.querySelector('#af-r').value,_op=_rsn==='عملية';const name=ov.querySelector('#af-name').value.trim();const dateVal=ov.querySelector('#af-date').value;if(!name||!dateVal){toastWarn('أكمل');return;}const doc=getDoctor(ov.querySelector('#af-doc').value);if(!doc){toastWarn('اختر طبيباً صحيحاً');return;}const newDate=new Date(dateVal);if(!Number.isFinite(newDate.getTime())){toastWarn('تاريخ الموعد غير صحيح');return;}const clash=state.appointments.find(x=>x.id!==(a&&a.id)&&x.doctorId===doc.id&&x.status!=='cancelled'&&Math.abs(new Date(x.date)-newDate)<20*60000);if(clash){toastError('⚠️ للطبيب موعد آخر في نفس الوقت: '+clash.patientName);return;}
+const payload=edit?{...a,patientName:name,phone:ov.querySelector('#af-phone').value.trim(),date:newDate.toISOString(),doctorId:doc.id,doctorName:doc.name,reason:_rsn,apptType:_op?'surgery':(_rsn==='استشارة'?'consult':'exam'),procedure:_op?ov.querySelector('#af-proc').value.trim():'',orRoom:_op?ov.querySelector('#af-orr').value:''}:{id:'a'+uid(),patientId:'',patientRef:(prefillPatientId&&getPatient(prefillPatientId)&&normName(getPatient(prefillPatientId).name)===normName(name))?prefillPatientId:'',patientName:name,phone:ov.querySelector('#af-phone').value.trim(),date:newDate.toISOString(),doctorId:doc.id,doctorName:doc.name,status:'confirmed',reason:_rsn,apptType:_op?'surgery':(_rsn==='استشارة'?'consult':'exam'),procedure:_op?ov.querySelector('#af-proc').value.trim():'',orRoom:_op?ov.querySelector('#af-orr').value:'',createdAt:new Date().toISOString()};
+await cloudAppointmentMutation(edit?'update':'add',payload);
+await cloudReloadCanonicalState();
+ov.remove();renderAll();toastSuccess(edit?'تم حفظ الموعد على الخادم':'تم إضافة الموعد على الخادم');
+}catch(err){console.error('Appointment cloud mutation failed:',err);toastError('فشل حفظ الموعد على الخادم: '+(err&&err.message||'خطأ اتصال'));}finally{ov._busy=false;if(submit&&document.body.contains(submit))submit.disabled=false;}});
+}
 function apptFindPatient(a){if(!a) return null;const byRef=a.patientRef?getPatient(a.patientRef):null;if(byRef) return byRef;const m=findPatientMatches({name:a.patientName,phone:a.phone}).strong[0];return m?m.p:null;}
 /* مسار واحد لتسجيل الحضور: مريض جديد / مريض له ملف بلا زيارة نشطة / مريض لديه زيارة نشطة */
 async function apptCheckIn(a,doc,payM){
-  const now=new Date().toISOString();const ex=apptFindPatient(a);
-  if(ex&&ex.status==='active'){/* زيارة نشطة: نربط الموعد بها فقط — لا زيارة جديدة ولا رسوم مكررة */
-    a.patientId=ex.id;a.visitId=ex.currentVisitId;a.arrivedAt=a.arrivedAt||now;a.status=ex.roomNo?'in_visit':'arrived';if(!ex.appointmentId) ex.appointmentId=a.id;
-    logAction('حضور موعد (ربط بزيارة نشطة)',ex.name,'');return {p:ex,mode:'linked'};}
-  if(ex){/* ملف سابق: زيارة جديدة بنفس إعادة الضبط المستخدمة في «زيارة جديدة» حتى يدخل قائمة الانتظار فعلاً */
-    (ex.visits=ex.visits||[]).push({entryDate:ex.entryDate,exitDate:ex.exitDate,doctorId:ex.doctorId,doctorName:ex.doctorName,complaint:ex.complaint,type:ex.visitType||'كشف',dischargeStatus:ex.dischargeStatus||''});
-    Object.assign(ex,{status:'active',dept:'reception',doctorId:doc.id,doctorName:doc.name,specialty:doc.specialty,roomNo:null,seen:false,seenAt:null,calledAt:null,checkoutPending:false,dischargeStatus:'',dischargeNotes:'',creditDischarge:'',visitType:'كشف',stayBilled:0,entryDate:now,currentVisitId:'v'+uid(),exitDate:null,complaint:a.reason||'كشف',appointmentId:a.id});
-    a.patientId=ex.id;a.visitId=ex.currentVisitId;a.arrivedAt=now;a.status='arrived';
-    if(doc.fee>0){addCharge(ex.id,'كشف — '+doc.name,doc.fee,1,doc.id,null,{sourceType:'consult',sourceId:ex.currentVisitId,idempotencyKey:'consult:'+ex.currentVisitId+':'+doc.id});await collectFee(ex.id,payM);}
-    logAction('حضور موعد (مريض سابق)',ex.name,'');return {p:ex,mode:'returning'};}
-  const np={id:'p'+uid(),dept:'reception',name:String(a.patientName||'').trim().replace(/\s+/g,' '),nationalId:'',phone:a.phone||'',address:'',dob:'',gender:'',doctorId:doc.id,doctorName:doc.name,specialty:doc.specialty,anesthId:'',anesthName:'',roomNo:null,entryDate:now,currentVisitId:'v'+uid(),estimatedExit:null,complaint:a.reason||'كشف',operationName:'',bloodType:'',allergies:[],chronicDiseases:[],notes:[],exitDate:null,status:'active',journey:[],diagnoses:[],vitals:[],labs:[],appointmentId:a.id,payerId:'py3',visits:[],visitType:'كشف',triage:0};
-  state.patients.push(np);a.patientId=np.id;a.visitId=np.currentVisitId;a.arrivedAt=now;a.status='arrived';
-  if(doc.fee>0){addCharge(np.id,'كشف — '+doc.name,doc.fee,1,doc.id,null,{sourceType:'consult',sourceId:np.currentVisitId,idempotencyKey:'consult:'+np.currentVisitId+':'+doc.id});await collectFee(np.id,payM);}
-  logAction('حضور موعد',np.name,'');return {p:np,mode:'new'};}
+  const ex=apptFindPatient(a);
+  if(!ex || ex.status!=='active') throw new Error('تسجيل حضور مريض جديد أو فتح زيارة جديدة يحتاج معاملة سحابية تشمل الملف والفاتورة والتحصيل معًا. تم إيقاف العملية مؤقتًا لمنع حفظ جزئي أو تحصيل غير متزامن.');
+  if(!window._cloudBootstrapped || !window.HospitalCloud) throw new Error('اتصال المستشفى السحابي غير جاهز.');
+  if(!ex.currentVisitId) throw new Error('المريض لديه زيارة نشطة لكن رقم الزيارة غير موجود؛ يلزم معالجة الملف قبل الربط.');
+  const result=await HospitalCloud.checkInActiveAppointment(a.id,ex.id,ex.currentVisitId);
+  const now=result.arrivedAt||new Date().toISOString();
+  a.patientId=ex.id;a.visitId=ex.currentVisitId;a.arrivedAt=now;a.status=ex.roomNo?'in_visit':'arrived';
+  if(!ex.appointmentId) ex.appointmentId=a.id;
+  logAction('حضور موعد (ربط سحابي بزيارة نشطة)',ex.name,'');
+  return {p:ex,mode:'linked'};
+}
 function registerAppt(id){if(!requirePerm('appt.register')) return;const a0=state.appointments.find(x=>x.id===id);const blk=apptBlock(a0);if(blk){toastWarn(blk);return;}if(!state.doctors.length){toastWarn('أضف طبيب');return;}
   const doc=getDoctor(a0.doctorId)||state.doctors[0];const found=apptFindPatient(a0);const linkOnly=!!(found&&found.status==='active');
-  const note=linkOnly?`للمريض زيارة مفتوحة بالفعل — سيُربط الموعد بها دون إنشاء زيارة جديدة أو رسوم إضافية`:found?`سيُفتح زيارة جديدة على الملف السابق + إضافة كشف ${fmtMoney(doc.fee||0)}`:`سيتم فتح ملف جديد + إضافة كشف ${fmtMoney(doc.fee||0)}`;
-  const body=`<div style="padding:14px;background:var(--primary-50);border-radius:10px;margin-bottom:14px"><div style="font-size:15px;font-weight:800;margin-bottom:4px">${esc(a0.patientName)}</div><div style="font-size:12px;color:var(--muted);font-weight:600">📅 ${fmtDT(a0.date)}</div><div style="font-size:12px;color:var(--muted);font-weight:600;margin-top:3px">👨‍⚕️ ${esc(doc.name)}</div></div><div class="alert info"><span>ℹ️</span><div>${note}</div></div>${(!linkOnly&&doc.fee>0)?'<div class="field" style="margin-top:12px"><label>تحصيل الكشف (إجباري)</label><select id="ra-pay"><option value="cash">💵 نقدي</option><option value="card">💳 بطاقة</option></select></div>':''}`;
+  const note=linkOnly?`للمريض زيارة مفتوحة بالفعل — سيتم ربط الموعد بها سحابيًا دون إنشاء زيارة جديدة أو رسوم إضافية`:`تسجيل حضور مريض جديد أو فتح زيارة جديدة متوقف مؤقتًا حتى تكتمل المعاملة السحابية الذرية للملف والفاتورة والتحصيل.`;
+  const body=`<div style="padding:14px;background:var(--primary-50);border-radius:10px;margin-bottom:14px"><div style="font-size:15px;font-weight:800;margin-bottom:4px">${esc(a0.patientName)}</div><div style="font-size:12px;color:var(--muted);font-weight:600">📅 ${fmtDT(a0.date)}</div><div style="font-size:12px;color:var(--muted);font-weight:600;margin-top:3px">👨‍⚕️ ${esc(doc.name)}</div></div><div class="alert info"><span>ℹ️</span><div>${note}</div></div>`;
   const ov=openModal({title:'✓ تسجيل حضور',body,footer:`<button class="btn ghost" data-close>إلغاء</button><button class="btn primary" id="cf">✓ تأكيد</button>`});
   ov.querySelector('#cf').onclick=async ()=>{if(ov._busy) return;ov._busy=true;const cf=ov.querySelector('#cf');cf.disabled=true;
     try{const a=state.appointments.find(x=>x.id===id);const b2=apptBlock(a);if(b2){toastWarn(b2);ov.remove();renderAll();return;}
       const r=await apptCheckIn(a,getDoctor(a.doctorId)||doc,ov.querySelector('#ra-pay')?.value);
-      save();ov.remove();renderAll();
+      ov.remove();renderAll();
       if(r.mode==='linked'){toastSuccess('تم — رُبط الموعد بالزيارة المفتوحة');return;}
       toastSuccess(r.mode==='returning'?'تم — رُبط بالملف السابق':'تم التسجيل');
       if(r.mode==='new') setTimeout(async ()=>{if(await appConfirm('فتح الملف؟')) openPatientProfile(r.p.id);},300);
     }catch(err){console.error('registerAppt',err);toastError('تعذر تسجيل الحضور: '+(err&&err.message||''));}
     finally{ov._busy=false;if(document.body.contains(cf)) cf.disabled=false;}};}
-async function cancelAppt(id){if(!requirePerm('appt.cancel')) return;const a=state.appointments.find(x=>x.id===id);if(!a) return;const st=apptEff(a);if(st!=='confirmed'){toastWarn('لا يمكن إلغاء موعد حالته: '+apptLabel(a));return;}
-  if(!await appConfirm('إلغاء موعد '+a.patientName+'؟')) return;const a2=state.appointments.find(x=>x.id===id);if(!a2||apptEff(a2)!=='confirmed') return;
-  a2.status='cancelled';a2.cancelledAt=new Date().toISOString();logAction('إلغاء موعد',a2.patientName,fmtDT(a2.date));save();renderAll();toastSuccess('تم إلغاء الموعد');}
-function markNoShow(id){if(!requirePerm('appt.edit')) return;const a=state.appointments.find(x=>x.id===id);if(!a) return;if(apptEff(a)!=='confirmed'){toastWarn('لا يمكن تسجيل «لم يحضر» لموعد حالته: '+apptLabel(a));return;}
-  a.status='no_show';a.noShowAt=new Date().toISOString();logAction('موعد — لم يحضر',a.patientName,fmtDT(a.date));save();renderAll();toastSuccess('تم تسجيل «لم يحضر»');}
+async function cancelAppt(id){if(!requirePerm('appt.cancel')) return;const a=state.appointments.find(x=>x.id===id);if(!a) return;const st=apptEff(a);if(st!=='confirmed'){toastWarn('لا يمكن إلغاء موعد حالته: '+apptLabel(a));return;}if(!await appConfirm('إلغاء موعد '+a.patientName+'؟')) return;const a2=state.appointments.find(x=>x.id===id);if(!a2||apptEff(a2)!=='confirmed') return;const candidate={...a2,status:'cancelled'};try{await cloudAppointmentMutation('update',candidate);await cloudReloadCanonicalState();renderAll();toastSuccess('تم إلغاء الموعد على الخادم');}catch(err){console.error('Appointment cancel failed:',err);toastError('تعذر إلغاء الموعد على الخادم: '+(err.message||'خطأ اتصال'));}}
+async function markNoShow(id){if(!requirePerm('appt.edit')) return;const a=state.appointments.find(x=>x.id===id);if(!a) return;if(apptEff(a)!=='confirmed'){toastWarn('لا يمكن تسجيل «لم يحضر» لموعد حالته: '+apptLabel(a));return;}const candidate={...a,status:'no_show'};try{await cloudAppointmentMutation('update',candidate);await cloudReloadCanonicalState();renderAll();toastSuccess('تم تسجيل «لم يحضر» على الخادم');}catch(err){console.error('Appointment no-show update failed:',err);toastError('تعذر تحديث حالة الموعد على الخادم: '+(err.message||'خطأ اتصال'));}}
 function openApptDetail(id){const a=state.appointments.find(x=>x.id===id);if(!a) return;const reg=a.patientId?getPatient(a.patientId):null;const body=`<div style="padding:14px;background:var(--surface);border-radius:10px;margin-bottom:14px"><div style="font-size:15px;font-weight:800;margin-bottom:5px">${esc(a.patientName)}</div><div style="font-size:12px;color:var(--muted);font-weight:600">📅 ${fmtDT(a.date)}</div>${a.doctorName?`<div style="font-size:12px;color:var(--muted);font-weight:600;margin-top:3px">👨‍⚕️ ${esc(a.doctorName)}</div>`:''}<div style="font-size:12px;color:var(--muted);font-weight:600;margin-top:3px">الحالة: ${apptLabel(a)}</div></div><div style="display:flex;gap:8px;flex-wrap:wrap">${!reg&&!apptBlock(a)?`<button class="btn primary" onclick="this.closest('.overlay').remove();registerAppt('${a.id}')" data-perm="appt.register">✓ حضر</button>`:''}${reg?`<button class="btn primary" onclick="this.closest('.overlay').remove();openPatientProfile('${a.patientId}')">📂 الملف</button>`:''}<button class="btn ghost" data-close>إغلاق</button></div>`;openModal({title:'📅 تفاصيل',body});}
 
 // ------------------------------------------------------------
@@ -3562,8 +3851,9 @@ function openVitals(pid){
   ov.querySelector('#vf').addEventListener('submit',e=>{
     e.preventDefault();
     const _bpS=ov.querySelector('#v-bp').value.trim();const _bpM=_bpS.match(/^(\d{2,3})\s*\/\s*(\d{2,3})$/);const _sys=_bpM?+_bpM[1]:null,_dia=_bpM?+_bpM[2]:null;if(_bpS&&!_bpM){toastWarn('صيغة الضغط: 120/80');return;}const _vals={hr:_vnum(ov.querySelector('#v-hr').value,false),temp:_vnum(ov.querySelector('#v-temp').value,true),spo2:_vnum(ov.querySelector('#v-spo2').value,false)};const _odd=(_sys!==null&&(_sys<50||_sys>260||_dia<20||_dia>160||_dia>=_sys))||(_vals.hr!=null&&(_vals.hr<20||_vals.hr>220))||(_vals.temp!=null&&(_vals.temp<30||_vals.temp>43))||(_vals.spo2!=null&&_vals.spo2<50);if(_odd) toastWarn('⚠️ قيمة غير معتادة — تأكد من القراءة (تم الحفظ للمراجعة)');p.vitals.unshift({id:'v'+uid(),visitId:ensureVisitId(p),reviewFlag:!!_odd,at:new Date().toISOString(),by:state.currentUser?.name||'',bpSys:_sys,bpDia:_dia,bp:_bpS,hr:_vnum(ov.querySelector('#v-hr').value,false),temp:_vnum(ov.querySelector('#v-temp').value,true),rr:_vnum(ov.querySelector('#v-rr').value,false),spo2:_vnum(ov.querySelector('#v-spo2').value,false),wt:_vnum(ov.querySelector('#v-wt').value,true),note:ov.querySelector('#v-n').value.trim()});
-    logAction('تسجيل علامات حيوية',p.name,'');save();ov.remove();
-    document.querySelectorAll('.pp-overlay').forEach(o=>o.remove());openPatientProfile(pid);toastSuccess('تم الحفظ');
+    const vital=p.vitals[0];
+    ov.querySelector('button[type=submit]').disabled=true;
+    cloudPatientClinicalMutation(pid,'vitals','add',vital).then(()=>{ov.remove();document.querySelectorAll('.pp-overlay').forEach(o=>o.remove());openPatientProfile(pid);toastSuccess('تم حفظ العلامات الحيوية على الخادم');}).catch(err=>{console.error(err);toastError('تعذر حفظ العلامات الحيوية: '+(err.message||'خطأ اتصال'));});
   });
 }
 function openLabs(pid){
@@ -3580,8 +3870,8 @@ function openLabs(pid){
     e.preventDefault();
     const name=ov.querySelector('#l-n').value.trim();if(!name){toastWarn('أدخل اسم التحليل');return;}
     {const _v=ov.querySelector('#l-v').value.trim(),_me=state.currentUser?.name||'',_t=new Date().toISOString();p.labs.unshift({id:'l'+uid(),at:_t,by:_me,requestedBy:_me,status:_v?'resulted':'requested',resultedBy:_v?_me:'',resultedAt:_v?_t:'',history:[{at:_t,by:_me,to:_v?'resulted':'requested'}],name,value:_v,unit:ov.querySelector('#l-u').value.trim(),range:ov.querySelector('#l-r').value.trim(),note:ov.querySelector('#l-note').value.trim()});}
-    logAction('تسجيل تحليل',p.name,name);save();ov.remove();
-    document.querySelectorAll('.pp-overlay').forEach(o=>o.remove());openPatientProfile(pid);toastSuccess('تم الحفظ');
+    const lab=p.labs[0];ov.querySelector('button[type=submit]').disabled=true;
+    cloudPatientClinicalMutation(pid,'labs','add',lab).then(()=>{ov.remove();document.querySelectorAll('.pp-overlay').forEach(o=>o.remove());openPatientProfile(pid);toastSuccess('تم حفظ التحليل على الخادم');}).catch(err=>{console.error(err);toastError('تعذر حفظ التحليل: '+(err.message||'خطأ اتصال'));});
   });
 }
 
@@ -3603,7 +3893,7 @@ async function labStep(pid,lid){
     l.verifiedBy=me;l.verifiedAt=now;}
   const from=cur;l.status=nx.to;l.history=(l.history||[]).concat([{at:now,by:me,from,to:nx.to}]);
   logAction('مختبر: '+labStLbl(l),pt.name,l.name,{entityType:'lab',entityId:l.id,before:{status:from},after:{status:nx.to}});
-  save();document.querySelectorAll('.pp-overlay').forEach(o=>o.remove());openPatientProfile(pid);toastSuccess('تم تحديث حالة التحليل');
+  try{await cloudPatientClinicalMutation(pid,'labs','update',l);document.querySelectorAll('.pp-overlay').forEach(o=>o.remove());openPatientProfile(pid);toastSuccess('تم تحديث حالة التحليل على الخادم');}catch(err){toastError('تعذر تحديث التحليل: '+(err.message||'خطأ اتصال'));}
 }
 async function labCancel(pid,lid){
   if(!requirePerm('clinical.add')) return;
@@ -3612,7 +3902,7 @@ async function labCancel(pid,lid){
   const from=l.status||'resulted',now=new Date().toISOString(),me=state.currentUser?.name||'';
   l.status='cancelled';l.cancelReason=String(why).trim();l.history=(l.history||[]).concat([{at:now,by:me,from,to:'cancelled',reason:l.cancelReason}]);
   logAction('إلغاء تحليل',pt.name,l.name+' · '+l.cancelReason,{entityType:'lab',entityId:l.id,before:{status:from},after:{status:'cancelled'},reason:l.cancelReason});
-  save();document.querySelectorAll('.pp-overlay').forEach(o=>o.remove());openPatientProfile(pid);toastSuccess('تم الإلغاء');
+  try{await cloudPatientClinicalMutation(pid,'labs','update',l,l.cancelReason);document.querySelectorAll('.pp-overlay').forEach(o=>o.remove());openPatientProfile(pid);toastSuccess('تم إلغاء التحليل على الخادم');}catch(err){toastError('تعذر إلغاء التحليل: '+(err.message||'خطأ اتصال'));}
 }
 function openAddNote(pid){
   if(!requirePerm('clinical.add')) return;
@@ -3624,10 +3914,8 @@ function openAddNote(pid){
     const t=ov.querySelector('#nf-t').value.trim();
     if(!t) return;
     p.notes.push({id:'n'+uid(),text:t,at:new Date().toISOString(),by:state.currentUser?state.currentUser.name:''});
-    logAction('إضافة ملاحظة',p.name,t.slice(0,50));
-    save();ov.remove();
-    openPatientProfile(pid);
-    toastSuccess('تم');
+    const note=p.notes[p.notes.length-1];ov.querySelector('button[type=submit]').disabled=true;
+    cloudPatientClinicalMutation(pid,'notes','add',note).then(()=>{ov.remove();openPatientProfile(pid);toastSuccess('تم حفظ الملاحظة على الخادم');}).catch(err=>{console.error(err);toastError('تعذر حفظ الملاحظة: '+(err.message||'خطأ اتصال'));});
   });
 }
 
@@ -3724,6 +4012,7 @@ function openDiagnosis(pid, diagId){
   if(!requirePerm('clinical.add')) return;
   const p=getPatient(pid);
   const isEdit=!!diagId;
+  if(!p.diagnoses) p.diagnoses=[];
   const diag=isEdit?p.diagnoses.find(d=>d.id===diagId):null;
   
   const body = `
@@ -3740,29 +4029,12 @@ function openDiagnosis(pid, diagId){
   `;
   
   const ov=openModal({title:isEdit?'✏️ تعديل التشخيص':'🩺 إضافة تشخيص',body});
-  ov.querySelector('#diag-form').addEventListener('submit',e=>{
-    e.preventDefault();
-    const text=ov.querySelector('#diag-text').value.trim();
-    if(!text) return;
-    
-    if(isEdit){
-      diag.text=text;
-      diag.date=new Date().toISOString();
-      diag.doctorName=state.currentUser.name;
-    }else{
-      p.diagnoses.unshift({
-        id:'diag'+uid(),
-        text:text,
-        date:new Date().toISOString(),
-        doctorName:state.currentUser.name
-      });
-    }
-    logAction(isEdit?'تعديل تشخيص':'إضافة تشخيص', p.name, text);
-    save();
-    ov.remove();
-    renderAll();
-    openPatientProfile(pid);
-    toastSuccess('تم الحفظ');
+  ov.querySelector('#diag-form').addEventListener('submit',async e=>{
+    e.preventDefault();const text=ov.querySelector('#diag-text').value.trim();if(!text)return;
+    const record=isEdit?{...diag,text,date:new Date().toISOString(),doctorName:state.currentUser.name}:{id:'diag'+uid(),text,date:new Date().toISOString(),doctorName:state.currentUser.name};
+    const btn=ov.querySelector('button[type=submit]');btn.disabled=true;
+    try{await cloudPatientClinicalMutation(pid,'diagnoses',isEdit?'update':'add',record);ov.remove();renderAll();openPatientProfile(pid);toastSuccess('تم حفظ التشخيص على الخادم');}
+    catch(err){btn.disabled=false;toastError('تعذر حفظ التشخيص: '+(err.message||'خطأ اتصال'));}
   });
 }
 
@@ -3776,7 +4048,7 @@ async function deleteDiagnosis(pid, diagId){
   d.cancelled=true;d.cancelledAt=new Date().toISOString();d.cancelledBy=(state.currentUser&&state.currentUser.name)||'';d.cancelReason=String(why).trim();
   d.history=(d.history||[]).concat([{at:d.cancelledAt,by:d.cancelledBy,action:'cancel',reason:d.cancelReason}]);
   logAction('إلغاء تشخيص',p.name,d.cancelReason,{entityType:'diagnosis',entityId:d.id,before:before,after:{cancelled:true},reason:d.cancelReason});
-  save();renderAll();openPatientProfile(pid);toastSuccess('تم إلغاء التشخيص (محفوظ في السجل)');
+  cloudPatientClinicalMutation(pid,'diagnoses','update',d,d.cancelReason).then(()=>{renderAll();openPatientProfile(pid);toastSuccess('تم إلغاء التشخيص على الخادم (محفوظ في السجل)');}).catch(err=>toastError('تعذر إلغاء التشخيص: '+(err.message||'خطأ اتصال')));
 }
 
 // Prescription System
@@ -3838,6 +4110,37 @@ function openPrescription(pid){
     logAction('إضافة روشتة',p.name,`${items.length} دواء`);save();ov.remove();renderAll();openPatientProfile(pid);toastSuccess('تم حفظ الروشتة');});
 }
 
+// Stage 19: explicit allowlisted cloud mutations for patient registration and edits.
+const CLOUD_PATIENT_FIELDS=['id','dept','name','nationalId','phone','address','dob','gender','doctorId','doctorName','specialty','anesthId','anesthName','roomNo','entryDate','arrivedAt','estimatedExit','complaint','triage','operationName','bloodType','allergies','chronicDiseases','notes','exitDate','status','payerId','journey','diagnoses','vitals','labs','appointmentId','currentVisitId','visits','visitType'];
+function cloudPatientRecord(patient){const out={};for(const k of CLOUD_PATIENT_FIELDS)if(patient[k]!==undefined)out[k]=structuredClone(patient[k]);return out;}
+async function cloudPatientMutation(operation, patient){
+  if(!window._cloudBootstrapped || !window.HospitalCloud) throw new Error('اتصال المستشفى السحابي غير جاهز.');
+  return HospitalCloud.mutate('patients',operation,cloudPatientRecord(patient),patient.id);
+}
+async function cloudPatientClinicalMutation(patientId,listKey,operation,record,reason){
+  if(!window._cloudBootstrapped || !window.HospitalCloud?.status().authenticated) throw new Error('لا يوجد اتصال سحابي مسجل — لم يتم حفظ البيانات الطبية.');
+  try{await HospitalCloud.mutatePatientClinical(patientId,listKey,operation,record,reason||'');await cloudReloadCanonicalState();}
+  catch(err){try{await cloudReloadCanonicalState();}catch(_){}throw err;}
+}
+
+// Stage 20: appointment mutations use the same server-first rule as patient records.
+const CLOUD_APPOINTMENT_FIELDS=['id','patientId','patientRef','patientName','phone','date','doctorId','doctorName','status','reason','apptType','procedure','orRoom','createdAt','arrivedAt','visitId'];
+function cloudAppointmentRecord(appt){const out={};for(const k of CLOUD_APPOINTMENT_FIELDS)if(appt[k]!==undefined)out[k]=structuredClone(appt[k]);return out;}
+async function cloudAppointmentMutation(operation, appt){
+  if(!window._cloudBootstrapped || !window.HospitalCloud) throw new Error('اتصال المستشفى السحابي غير جاهز.');
+  return HospitalCloud.mutate('appointments',operation,cloudAppointmentRecord(appt),appt.id);
+}
+// Stage 44: after a scoped server mutation, rehydrate the canonical server state.
+// Never follow a successful mutation with a full-state save from the browser.
+async function cloudReloadCanonicalState(){
+  const fresh=await HospitalCloud.refreshState();
+  if(!fresh||!fresh.state||!fresh.user) throw new Error('تم تنفيذ العملية لكن تعذر إعادة تحميل الحالة المؤكدة من الخادم.');
+  state=Object.assign(defaultState(),fresh.state);
+  state.currentUser={id:fresh.user.id,name:fresh.user.name,username:fresh.user.username,role:fresh.user.role,permissions:[...(fresh.user.permissions||[])],doctorId:fresh.user.doctorId||''};
+  window._cloudRevision=Number(fresh.revision||window._cloudRevision||0);
+  return fresh;
+}
+
 function openPatientChooser(){if(!requirePerm('patient.add')) return;if(!state.doctors.length){openModal({title:'⚠️ لا يوجد أطباء',body:`<div class="empty"><span class="icon">👨‍⚕️</span><p>يجب إضافة طبيب واحد على الأقل قبل تسجيل المرضى</p><button class="btn primary" style="margin-top:12px" onclick="this.closest('.overlay').remove();navigateTo('settings');setSettingsTab('doctors')">⚙️ إضافة طبيب</button></div>`});return;}const body=`<div style="text-align:center;margin-bottom:16px;font-size:13px;font-weight:700">القسم</div><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(105px,1fr));gap:12px"><button onclick="this.closest('.overlay').remove();openPatientForm('reception')" style="background:var(--blue-soft);border:2px solid var(--blue-border);border-radius:12px;padding:20px 14px;cursor:pointer;font-family:inherit;display:flex;flex-direction:column;align-items:center;text-align:center;gap:10px"><div style="width:54px;height:54px;border-radius:14px;background:var(--blue-bg);color:var(--blue-text);display:grid;place-items:center;font-size:26px">🛎️</div><div style="font-size:14px;font-weight:800">استقبال</div><div style="font-size:11px;color:var(--muted);font-weight:600">مريض عادي</div></button><button onclick="this.closest('.overlay').remove();openPatientForm('operations')" style="background:var(--purple-soft);border:2px solid var(--purple-border);border-radius:12px;padding:20px 14px;cursor:pointer;font-family:inherit;display:flex;flex-direction:column;align-items:center;text-align:center;gap:10px"><div style="width:54px;height:54px;border-radius:14px;background:var(--purple-bg);color:var(--purple-text);display:grid;place-items:center;font-size:26px">🔪</div><div style="font-size:14px;font-weight:800">عمليات</div><div style="font-size:11px;color:var(--muted);font-weight:600">جراحي</div></button><button onclick="this.closest('.overlay').remove();openPatientForm('emergency')" style="background:var(--danger-soft);border:2px solid var(--danger-border);border-radius:12px;padding:20px 14px;cursor:pointer;font-family:inherit;display:flex;flex-direction:column;align-items:center;text-align:center;gap:10px"><div style="width:54px;height:54px;border-radius:14px;background:var(--danger-bg);color:var(--danger-text);display:grid;place-items:center;font-size:26px">🚑</div><div style="font-size:14px;font-weight:800">طوارئ</div><div style="font-size:11px;color:var(--muted);font-weight:600">حالة عاجلة</div></button></div>`;openModal({title:'👤 مريض جديد',body});}
 function openPatientForm(dept){
   if(!requirePerm('patient.add')) return;if(!dept) return openPatientChooser();if(!state.doctors.length){toastWarn('أضف طبيب أولاً');return;}
@@ -3894,23 +4197,34 @@ function openPatientForm(dept){
     if(isOR&&!$('#pf-op').value.trim()) return fErr('#pf-op','أدخل العملية');
     const doc=getDoctor($('#pf-doctor').value);
     const np={id:'p'+uid(),dept,name,nationalId:nid,phone,address:$('#pf-addr').value.trim(),dob:dobFromAge($('#pf-age').value),gender:$('#pf-gender').value,doctorId:doc.id,doctorName:doc.name,specialty:doc.specialty,anesthId:'',anesthName:'',roomNo:null,entryDate:new Date().toISOString(),arrivedAt:new Date().toISOString(),currentVisitId:'v'+uid(),estimatedExit:null,complaint:$('#pf-complaint').value.trim(),triage:isEM?(parseInt($('#pf-triage').value)||3):0,operationName:isOR?$('#pf-op').value.trim():'',bloodType:$('#pf-blood').value,allergies:$('#pf-allergies').value.split(',').map(x=>x.trim()).filter(Boolean),chronicDiseases:$('#pf-chronic').value.split(',').map(x=>x.trim()).filter(Boolean),notes:[],exitDate:null,status:'active',payerId:$('#pf-payer').value,journey:[],diagnoses:[],vitals:[],labs:[],visitType:'كشف',visits:[]};
-    state.patients.push(np);
-    if(doc.fee>0&&!isOR){addCharge(np.id,'كشف — '+doc.name,doc.fee,1,doc.id);const m=$('#pf-pay')?$('#pf-pay').value:'';const inv=state.invoices.find(i=>i.patientId===np.id);if(m&&inv){const due=roundMoney(inv.total-inv.paid);if(due>0&&await addPayment(inv,due,m)) setTimeout(()=>openReceipt(inv.id,inv.payments.length-1),400);}}
-    logAction(isOR?'دخول عمليات':'دخول مريض',np.name,'');save();ov.remove();renderAll();toastSuccess('تم التسجيل');openPatientProfile(np.id);})();}finally{ov._busy=false;if(_sb&&document.body.contains(_sb)) _sb.disabled=false;}});
+    // Patient + active visit + consultation invoice + optional receipt/cash movement are committed atomically.
+    const paymentMethod = (!isOR && doc.fee>0 && $('#pf-pay')) ? $('#pf-pay').value : '';
+    const cloudResult = await HospitalCloud.createPatientVisit(np, paymentMethod, 'new-patient-visit:'+np.id);
+    if (!cloudResult || !cloudResult.ok || !cloudResult.patient) throw new Error('الخادم لم يؤكد إنشاء الزيارة');
+    const savedPatient = cloudResult.patient;
+    state.patients.push(savedPatient);
+    if (cloudResult.invoice) state.invoices.push(cloudResult.invoice);
+    if (cloudResult.cashMovement) { state.cashMovements=state.cashMovements||[]; state.cashMovements.push(cloudResult.cashMovement); }
+    logAction(isOR?'دخول عمليات':'دخول مريض',savedPatient.name,'');save();ov.remove();renderAll();toastSuccess('تم التسجيل وحفظ الزيارة والفاتورة'+(cloudResult.cashMovement?' والتحصيل':'')+' على الخادم');
+    if(cloudResult.invoice&&cloudResult.invoice.payments&&cloudResult.invoice.payments.length) setTimeout(()=>openReceipt(cloudResult.invoice.id,0),400);
+    openPatientProfile(savedPatient.id);})();}finally{ov._busy=false;if(_sb&&document.body.contains(_sb)) _sb.disabled=false;}});
 }
 function openEditPatient(pid){if(!requirePerm('patient.edit')) return;const p=getPatient(pid);if(!p) return;
   const L=a=>(a||[]).join(', ');const o0=ageNum(p.dob);
   const body=`<form id="epf" novalidate><div class="form-grid"><div class="field full"><label>الاسم *</label><input id="epf-name" value="${esc(p.name)}"></div><div class="field"><label>الهاتف</label><input id="epf-phone" inputmode="tel" value="${esc(p.phone||'')}"></div><div class="field"><label>الرقم القومي</label><input id="epf-nid" inputmode="numeric" maxlength="14" value="${esc(p.nationalId||'')}"></div><div class="field"><label>السن (سنة)</label><input type="number" id="epf-age" min="0" max="120" value="${o0}"></div><div class="field"><label>الجنس</label><select id="epf-g"><option value="">—</option><option value="M" ${p.gender==='M'?'selected':''}>ذكر</option><option value="F" ${p.gender==='F'?'selected':''}>أنثى</option></select></div><div class="field full"><label>العنوان</label><input id="epf-addr" value="${esc(p.address||'')}"></div><div class="field"><label>فصيلة الدم</label><select id="epf-b"><option value="">—</option>${['A+','A-','B+','B-','AB+','AB-','O+','O-'].map(b=>`<option ${p.bloodType===b?'selected':''}>${b}</option>`).join('')}</select></div><div class="field"><label>شركة التأمين</label><select id="epf-payer">${(state.payers||[]).map(y=>`<option value="${esc(y.id)}" ${y.id===(p.payerId||'py3')?'selected':''}>${esc(y.name)}</option>`).join('')}</select></div><div class="field"><label>الحساسية</label><input id="epf-a" placeholder="افصل بفاصلة" value="${esc(L(p.allergies))}"></div><div class="field"><label>أمراض مزمنة</label><input id="epf-ch" placeholder="افصل بفاصلة" value="${esc(L(p.chronicDiseases))}"></div></div><div id="epf-err" style="color:var(--danger-text);font-weight:700;font-size:12px;margin-top:8px"></div><div style="display:flex;gap:10px;margin-top:14px"><button type="submit" class="btn primary" style="flex:1">💾 حفظ</button><button type="button" class="btn ghost" data-close>إلغاء</button></div></form>`;
   const ov=openModal({title:'✏️ تعديل بيانات المريض',body});const $=q=>ov.querySelector(q);let nidDob=null;
   $('#epf-nid').addEventListener('input',()=>{const n=$('#epf-nid').value.replace(/\D/g,'');$('#epf-nid').value=n;nidDob=null;if(/^[23]\d{13}$/.test(n)){const y=(n[0]==='2'?1900:2000)+(+n.slice(1,3));const d=new Date(`${y}-${n.slice(3,5)}-${n.slice(5,7)}T00:00:00`);if(!isNaN(d)){nidDob=`${y}-${n.slice(3,5)}-${n.slice(5,7)}`;$('#epf-age').value=Math.max(0,Math.floor((Date.now()-d.getTime())/(365.25*86400000)));}$('#epf-g').value=(+n[12])%2?'M':'F';}});
-  $('#epf').addEventListener('submit',e=>{e.preventDefault();if(window._epfBusy) return;const err=m=>{$('#epf-err').textContent='⛔ '+m;};
+  $('#epf').addEventListener('submit',async e=>{e.preventDefault();if(window._epfBusy) return;const err=m=>{$('#epf-err').textContent='⛔ '+m;};
     const name=$('#epf-name').value.trim(),nid=$('#epf-nid').value.trim(),phone=$('#epf-phone').value.trim(),age=$('#epf-age').value;
     if(!name) return err('الاسم مطلوب');if(nid&&!/^\d{14}$/.test(nid)) return err('الرقم القومي يجب أن يكون 14 رقماً');
     if(age!==''&&(!(+age>=0)||+age>120)) return err('السن غير صالح');
     if(nid){const o=state.patients.find(x=>x.id!==p.id&&x.nationalId===nid);if(o) return err('الرقم القومي مسجل لمريض آخر: '+o.name);}
     window._epfBusy=1;try{const upd={name,phone,nationalId:nid,gender:$('#epf-g').value,address:$('#epf-addr').value.trim(),bloodType:$('#epf-b').value,payerId:$('#epf-payer').value||p.payerId,allergies:$('#epf-a').value.split(',').map(s=>s.trim()).filter(Boolean),chronicDiseases:$('#epf-ch').value.split(',').map(s=>s.trim()).filter(Boolean)};
       if(nidDob) upd.dob=nidDob;else if(age!==''&&String(age)!==String(o0)) upd.dob=dobFromAge(age); /* لا نمسح تاريخ الميلاد الدقيق إلا إذا غُيّر السن فعلاً */
-      Object.assign(p,upd);logAction('تعديل مريض',p.name,'');save();ov.remove();document.querySelectorAll('.pp-overlay').forEach(x=>x.remove());renderAll();openPatientProfile(pid);toastSuccess('تم حفظ التعديل');}finally{window._epfBusy=0;}});}
+      const candidate={...p,...upd};
+      await cloudPatientMutation('update',candidate);
+      await cloudReloadCanonicalState();
+      ov.remove();document.querySelectorAll('.pp-overlay').forEach(x=>x.remove());renderAll();openPatientProfile(pid);toastSuccess('تم حفظ التعديل على الخادم وتحديث البيانات');}catch(cloudErr){console.error('Patient cloud mutation failed:',cloudErr);err('فشل الحفظ على الخادم: '+(cloudErr.message||'خطأ اتصال'));}finally{window._epfBusy=0;}});}
 
 /* تنفيذ ذري على مستوى التطبيق: لو فشل أي جزء تُستعاد كل الكائنات المذكورة كما كانت */
 function withRollback(objs,fn){let snap;try{snap=objs.map(o=>JSON.stringify(o));}catch(e){toastError('تعذر بدء العملية');return false;}
@@ -3941,7 +4255,46 @@ const _or=state.orSchedule.filter(o=>o.patientId===pid);if(_or.some(o=>o.status=
 const _rx=state.prescriptions.filter(r=>r.patientId===pid&&r.status!=='dispensed'&&r.status!=='cancelled');const _sc=_or.filter(o=>o.status==='scheduled');
 if(_rx.length&&!isMgr()){toastError('⛔ يوجد '+_rx.length+' روشتة غير مصروفة — تُصرف من الصيدلية أولاً ثم يُنهى الكشف');return;}
 if((_rx.length||_sc.length)&&!await appConfirm(`⚠️ قبل الخروج: ${_rx.length?_rx.length+' روشتة غير مصروفة. ':''}${_sc.length?_sc.length+' عملية مجدولة. ':''}متابعة الخروج؟`)) return;
-const _pend=stayAccrualPreview(p);/* V11-STAY-001: تقدير دون ترحيل */const inv=curInv(pid);const total=roundMoney((inv?inv.total:0)+_pend),paid=inv?inv.paid:0,r=roundMoney(patientTotalDue(pid)+_pend);const prevDue=roundMoney(r-_pend-(inv?Math.max(0,roundMoney(inv.total-inv.paid)):0));const days=Math.max(1,Math.ceil((Date.now()-new Date(p.entryDate).getTime())/86400000));const body=`<div style="padding:14px;background:var(--surface);border-radius:12px;margin-bottom:14px"><div style="font-size:15px;font-weight:800;margin-bottom:6px">${esc(p.name)}</div><div style="font-size:12px;color:var(--muted);font-weight:600">${deptLabel(p.dept)} · ${p.stayRoom?'إقامة: '+esc((getStayRoom(p.stayRoom)||{}).name||p.stayRoom):p.roomNo?'غرفة '+p.roomNo:'بدون غرفة'} · ${days} يوم</div><div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--border)"><div style="display:flex;justify-content:space-between;padding:4px 0;font-size:12px"><span>الإجمالي:</span><b>${fmtMoney(total)}</b></div><div style="display:flex;justify-content:space-between;padding:4px 0;font-size:12px"><span>المدفوع:</span><b style="color:var(--success-text)">${fmtMoney(paid)}</b></div>${prevDue>0?`<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:12px"><span>منها متبقي زيارات سابقة:</span><b style="color:var(--danger-text)">${fmtMoney(prevDue)}</b></div>`:''}<div style="display:flex;justify-content:space-between;padding:6px 0;font-size:13px;border-top:1px solid var(--border);margin-top:4px;font-weight:800"><span>المتبقي:</span><b style="color:${r>0?'var(--danger-text)':'var(--success-text)'}">${fmtMoney(r)}</b></div></div></div>${r>0&&!can('finance.collect')?'<div class="alert warn" style="margin-bottom:12px"><span>⚠️</span><div>سيُحوَّل المريض لشباك التحصيل (الاستقبال/المحاسب) لسداد المتبقي بعد إنهاء الكشف.</div></div>':''}${inv?`<details style="margin-bottom:12px"><summary style="cursor:pointer;font-weight:800;font-size:12px">🧾 تفاصيل الفاتورة (${(inv.items||[]).length} بند)</summary>${invMini(inv)}</details>`:''}${r>0?`<div class="field"><label>تسوية المتبقي (${fmtMoney(r)})</label><select id="dc-pay"><option value="cash">💵 تحصيل نقدي</option><option value="card">💳 تحصيل بطاقة</option>${isMgr()?'<option value="credit">⏳ آجل (بموافقة المدير)</option>':''}</select></div>`:''}${fromVisit===true?'':`<div class="field"><label>تاريخ الخروج</label><input type="datetime-local" id="dc-date" value="${toLocal(new Date())}"></div><div class="field"><label>الحالة</label><select id="dc-st"><option value="recovered">✓ تعافى</option><option value="improved">📈 تحسن</option><option value="transferred">🔄 تحويل</option></select></div><div class="field"><label>ملاحظات</label><textarea id="dc-n" rows="2"></textarea></div>`}`;const btnLabel=r>0?(can('finance.collect')?`✓ تحصيل ${fmtMoney(r)} وخروج`:(fromVisit===true?'➡️ إنهاء الكشف وتحويل للتحصيل':'✓ تأكيد الخروج')):'✓ تأكيد الخروج';const ov=openModal({title:fromVisit===true?'✓ إنهاء الكشف وتسوية الحساب':'⎋ خروج المريض',body,footer:`<button class="btn ghost" data-close>إلغاء</button>${inv?`<button class="btn ghost" onclick="openInvoiceDetail('${inv.id}')">🧾 الفاتورة</button>`:''}<button class="btn success" id="dc-confirm" ${r>0&&!can('finance.collect')&&fromVisit!==true?'disabled title="لن تتمكن من إتمام الخروج — المريض عليه متبقي، حوّله للمحاسب"':''}>${btnLabel}</button>`,size:'lg'});ov.querySelector('#dc-confirm').onclick=async ()=>{const _dateRaw=ov.querySelector('#dc-date')?.value||'';const _exitCandidate=fromVisit===true?new Date():new Date(_dateRaw);if(fromVisit!==true&&(!_dateRaw||isNaN(_exitCandidate.getTime()))){toastError('تاريخ الخروج غير صالح — لم يتم تنفيذ أي تغيير');return;}if(fromVisit!==true&&_exitCandidate.getTime()>Date.now()+60000){toastError('تاريخ الخروج لا يمكن أن يكون في المستقبل');return;}if(p.entryDate&&_exitCandidate.getTime()<new Date(p.entryDate).getTime()){toastError('تاريخ الخروج لا يمكن أن يسبق تاريخ الدخول');return;}accrueStay(p);/* الترحيل بعد تأكيد المستخدم فقط */if(r>0&&!can('finance.collect')){
+const _pend=stayAccrualPreview(p);/* V11-STAY-001: تقدير دون ترحيل */const inv=curInv(pid);const total=roundMoney((inv?inv.total:0)+_pend),paid=inv?inv.paid:0,r=roundMoney(patientTotalDue(pid)+_pend);const prevDue=roundMoney(r-_pend-(inv?Math.max(0,roundMoney(inv.total-inv.paid)):0));const days=Math.max(1,Math.ceil((Date.now()-new Date(p.entryDate).getTime())/86400000));const body=`<div style="padding:14px;background:var(--surface);border-radius:12px;margin-bottom:14px"><div style="font-size:15px;font-weight:800;margin-bottom:6px">${esc(p.name)}</div><div style="font-size:12px;color:var(--muted);font-weight:600">${deptLabel(p.dept)} · ${p.stayRoom?'إقامة: '+esc((getStayRoom(p.stayRoom)||{}).name||p.stayRoom):p.roomNo?'غرفة '+p.roomNo:'بدون غرفة'} · ${days} يوم</div><div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--border)"><div style="display:flex;justify-content:space-between;padding:4px 0;font-size:12px"><span>الإجمالي:</span><b>${fmtMoney(total)}</b></div><div style="display:flex;justify-content:space-between;padding:4px 0;font-size:12px"><span>المدفوع:</span><b style="color:var(--success-text)">${fmtMoney(paid)}</b></div>${prevDue>0?`<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:12px"><span>منها متبقي زيارات سابقة:</span><b style="color:var(--danger-text)">${fmtMoney(prevDue)}</b></div>`:''}<div style="display:flex;justify-content:space-between;padding:6px 0;font-size:13px;border-top:1px solid var(--border);margin-top:4px;font-weight:800"><span>المتبقي:</span><b style="color:${r>0?'var(--danger-text)':'var(--success-text)'}">${fmtMoney(r)}</b></div></div></div>${r>0&&!can('finance.collect')?'<div class="alert warn" style="margin-bottom:12px"><span>⚠️</span><div>سيُحوَّل المريض لشباك التحصيل (الاستقبال/المحاسب) لسداد المتبقي بعد إنهاء الكشف.</div></div>':''}${inv?`<details style="margin-bottom:12px"><summary style="cursor:pointer;font-weight:800;font-size:12px">🧾 تفاصيل الفاتورة (${(inv.items||[]).length} بند)</summary>${invMini(inv)}</details>`:''}${r>0?`<div class="field"><label>تسوية المتبقي (${fmtMoney(r)})</label><select id="dc-pay"><option value="cash">💵 تحصيل نقدي</option><option value="card">💳 تحصيل بطاقة</option>${isMgr()?'<option value="credit">⏳ آجل (بموافقة المدير)</option>':''}</select></div>`:''}${fromVisit===true?'':`<div class="field"><label>تاريخ الخروج</label><input type="datetime-local" id="dc-date" value="${toLocal(new Date())}"></div><div class="field"><label>الحالة</label><select id="dc-st"><option value="recovered">✓ تعافى</option><option value="improved">📈 تحسن</option><option value="transferred">🔄 تحويل</option></select></div><div class="field"><label>ملاحظات</label><textarea id="dc-n" rows="2"></textarea></div>`}`;const btnLabel=r>0?(can('finance.collect')?`✓ تحصيل ${fmtMoney(r)} وخروج`:(fromVisit===true?'➡️ إنهاء الكشف وتحويل للتحصيل':'✓ تأكيد الخروج')):'✓ تأكيد الخروج';const ov=openModal({title:fromVisit===true?'✓ إنهاء الكشف وتسوية الحساب':'⎋ خروج المريض',body,footer:`<button class="btn ghost" data-close>إلغاء</button>${inv?`<button class="btn ghost" onclick="openInvoiceDetail('${inv.id}')">🧾 الفاتورة</button>`:''}<button class="btn success" id="dc-confirm" ${r>0&&!can('finance.collect')&&fromVisit!==true?'disabled title="لن تتمكن من إتمام الخروج — المريض عليه متبقي، حوّله للمحاسب"':''}>${btnLabel}</button>`,size:'lg'});ov.querySelector('#dc-confirm').onclick=async ()=>{const _dateRaw=ov.querySelector('#dc-date')?.value||'';const _exitCandidate=fromVisit===true?new Date():new Date(_dateRaw);if(fromVisit!==true&&(!_dateRaw||isNaN(_exitCandidate.getTime()))){toastError('تاريخ الخروج غير صالح — لم يتم تنفيذ أي تغيير');return;}if(fromVisit!==true&&_exitCandidate.getTime()>Date.now()+60000){toastError('تاريخ الخروج لا يمكن أن يكون في المستقبل');return;}if(p.entryDate&&_exitCandidate.getTime()<new Date(p.entryDate).getTime()){toastError('تاريخ الخروج لا يمكن أن يسبق تاريخ الدخول');return;}if(window._cloudBootstrapped && window.HospitalCloud?.status().authenticated){
+    if(p.stayRoom){
+      const _stayBtn=ov.querySelector('#dc-confirm');if(_stayBtn){_stayBtn.disabled=true;_stayBtn.textContent='جارٍ تسوية الإقامة والتحقق…';}
+      try{
+        const _stayPreview=await HospitalCloud.previewStaySettlement(pid);
+        if(!_stayPreview?.ok) throw new Error('تعذر معاينة مستحقات الإقامة من الخادم');
+        if((_stayPreview.missingNights||[]).length){
+          await HospitalCloud.postStayNights(pid,'stay-post:'+String(p.stayId)+':'+String(_stayPreview.nights));
+        }
+        const _stayFresh=await HospitalCloud.refreshState();
+        if(!_stayFresh?.state) throw new Error('تعذر تحديث الفواتير بعد ترحيل ليالي الإقامة');
+        state=Object.assign(defaultState(),_stayFresh.state);
+        state.currentUser={id:_stayFresh.user.id,name:_stayFresh.user.name,username:_stayFresh.user.username,role:_stayFresh.user.role,permissions:[...(_stayFresh.user.permissions||[])],doctorId:_stayFresh.user.doctorId||''};
+        const _stayDue=roundMoney((state.invoices||[]).filter(i=>String(i.patientId)===String(pid)).reduce((a,i)=>a+Math.max(0,Number(i.total||0)-Number(i.paid||0)),0));
+        if(_stayDue>0.009){renderAll();if(_stayBtn){_stayBtn.disabled=false;_stayBtn.textContent=btnLabel;}toastWarn('تم ترحيل ليالي الإقامة. متبقي '+fmtMoney(_stayDue)+'؛ حصّله من شاشة الفواتير ثم أعد تأكيد الخروج. لم يتم تحرير السرير أو تسجيل الخروج.');return;}
+        if(_stayBtn)_stayBtn.textContent='جارٍ تأكيد الخروج النهائي…';
+        const _stayExit=fromVisit===true?new Date():_exitCandidate;
+        const _stayResult=await HospitalCloud.dischargeStay(pid,_stayExit.toISOString(),ov.querySelector('#dc-st')?.value||'recovered',ov.querySelector('#dc-n')?.value.trim()||'','stay-discharge:'+String(p.stayId));
+        if(!_stayResult?.ok||!_stayResult.patient||!_stayResult.stay) throw new Error('الخادم لم يؤكد الخروج النهائي');
+        const _stayReload=await HospitalCloud.refreshState();
+        if(!_stayReload?.state) throw new Error('تم الخروج على الخادم لكن تعذر تحديث الشاشة؛ أعد تحميل البيانات');
+        state=Object.assign(defaultState(),_stayReload.state);
+        state.currentUser={id:_stayReload.user.id,name:_stayReload.user.name,username:_stayReload.user.username,role:_stayReload.user.role,permissions:[...(_stayReload.user.permissions||[])],doctorId:_stayReload.user.doctorId||''};
+        logAction('خروج نهائي سحابي',_stayResult.patient.name||p.name,'');ov.remove();document.querySelectorAll('.pp-overlay').forEach(o=>o.remove());renderAll();openPatientProfile(pid);toastSuccess('تم خروج المريض وإنهاء الإقامة وتحرير السرير للتنظيف بعد تأكيد الخادم');return;
+      }catch(_stayErr){if(_stayBtn){_stayBtn.disabled=false;_stayBtn.textContent=btnLabel;}toastError(_stayErr.message||'فشل الخروج النهائي؛ لم يتم اعتماد تحرير السرير');return;}
+    }
+    if(r>0.009){toastError('لا يمكن تسجيل الخروج سحابيًا قبل تسوية كل الفواتير. لم يتم تنفيذ أي تحصيل أو خروج.');return;}
+    const _cloudBtn=ov.querySelector('#dc-confirm');if(_cloudBtn){_cloudBtn.disabled=true;_cloudBtn.textContent='جارٍ تأكيد الخروج سحابيًا…';}
+    try{
+      const _cloudExit=fromVisit===true?new Date():_exitCandidate;
+      const _cloudResult=await HospitalCloud.dischargePatient(pid,_cloudExit.toISOString(),ov.querySelector('#dc-st')?.value||'recovered',ov.querySelector('#dc-n')?.value.trim()||'');
+      if(!_cloudResult?.ok||!_cloudResult.patient)throw new Error('الخادم لم يؤكد خروج المريض');
+      Object.assign(p,_cloudResult.patient);
+      if(Array.isArray(_cloudResult.appointments))_cloudResult.appointments.forEach(_a=>{const _x=state.appointments.find(z=>String(z.id)===String(_a.id));if(_x)Object.assign(_x,_a);});
+      if(Array.isArray(_cloudResult.operations))_cloudResult.operations.forEach(_o=>{const _x=state.orSchedule.find(z=>String(z.id)===String(_o.id));if(_x)Object.assign(_x,_o);});
+      if(_cloudResult.room){const _rr=state.rooms.find(z=>String(z.num)===String(_cloudResult.room.num));if(_rr)Object.assign(_rr,_cloudResult.room);}
+      logAction('خروج سحابي',p.name,'');ov.remove();const _hadProfile=document.querySelector('.pp-overlay');if(_hadProfile)document.querySelectorAll('.pp-overlay').forEach(o=>o.remove());renderAll();if(_hadProfile)openPatientProfile(pid);toastSuccess('تم تأكيد خروج '+p.name+' من الخادم');
+    }catch(_cloudErr){if(_cloudBtn){_cloudBtn.disabled=false;_cloudBtn.textContent=btnLabel;}toastError(_cloudErr.message||'فشل تأكيد الخروج؛ لم يتم اعتماد التغيير');}
+    return;
+  }accrueStay(p);/* الترحيل بعد تأكيد المستخدم فقط */if(r>0&&!can('finance.collect')){
     if(fromVisit!==true){toastError('التحصيل من صلاحية الاستقبال/المحاسب');return;}
     p.seen=true;p.seenAt=new Date().toISOString();p.consultationEndedAt=p.seenAt;p.checkoutPending=true;p.checkoutAt=new Date().toISOString();apptSet(p,'completed');
     releaseVisitRoom(p);
@@ -3954,49 +4307,55 @@ function setMedFilter(v){const f=document.getElementById('med-filter');if(f){f.v
 function medStatus(m){const days=daysUntil(m.expiryDate);if((m.qty||0)<=0) return 'out';if(days!==null&&days<0) return 'expired';if(days!==null&&days<=30) return 'expiring';if((m.qty||0)<=(m.minQty||0)) return 'low';return 'ok';}
 function openMedForm(editId){if(!requirePerm('med.add')) return;const edit=!!editId;const m=edit?state.medications.find(x=>x.id===editId):null;const body=`<form id="mf"><div class="form-grid"><div class="field full"><label>الاسم</label><input id="m-n" value="${edit?esc(m.name):''}"></div><div class="field"><label>الشكل</label><input id="m-f" value="${edit?esc(m.form||'أقراص'):'أقراص'}"></div><div class="field"><label>التركيز</label><input id="m-s" value="${edit?esc(m.strength||''):''}"></div><div class="field"><label>${edit?'الكمية (للعرض — تتغير بحركة توريد/صرف/جرد فقط)':'الكمية الافتتاحية'}</label><input type="number" id="m-q" min="0" value="${edit?m.qty:''}" ${edit?'disabled':''}></div><div class="field"><label>💰 سعر البيع للوحدة المفردة</label><input type="number" id="m-price" min="0" step="0.01" placeholder="سعر بيع الوحدة" value="${edit&&m.price!==undefined?m.price:''}"></div><div class="field"><label>الحد الأدنى</label><input type="number" id="m-min" value="${edit?m.minQty:10}"></div><div class="field"><label>${edit?'الصلاحية (حسب الدفعات)':'الصلاحية'}</label><input type="date" id="m-x" value="${edit?m.expiryDate:''}" ${edit?'disabled':''}></div><div class="field"><label>الفئة</label><input id="m-cat" value="${edit?esc(m.category||''):''}"></div></div><div style="display:flex;gap:10px;margin-top:14px"><button type="submit" class="btn primary">💾</button><button type="button" class="btn ghost" data-close>إلغاء</button></div></form>`;const ov=openModal({title:edit?'✏️ تعديل':'💊 دواء جديد',body});ov.querySelector('#mf').addEventListener('submit',e=>{e.preventDefault();const name=ov.querySelector('#m-n').value.trim();if(!name){toastWarn('أدخل الاسم');return;}const _q0=parseInt(ov.querySelector('#m-q').value)||0,_x0=ov.querySelector('#m-x').value;const _pr=ov.querySelector('#m-price').value.trim();const _prn=_pr===''?NaN:Number(_pr);if(!Number.isFinite(_prn)||_prn<0){toastWarn('أدخل سعر بيع صحيح للوحدة');return;}const data={name,price:roundMoney(_prn),form:ov.querySelector('#m-f').value,strength:ov.querySelector('#m-s').value,minQty:parseInt(ov.querySelector('#m-min').value)||0,category:ov.querySelector('#m-cat').value};/* V11-STK-005: الكمية والصلاحية لا تُعدَّلان من نموذج الصنف — الرصيد الافتتاحي يدخل كدفعة وحركة */if(edit) Object.assign(m,data);else{if(_q0<0){toastWarn('كمية غير صالحة');return;}const _nm={id:'med'+uid(),...data,qty:0,expiryDate:'',batches:[]};state.medications.push(_nm);if(_q0>0) stockInDirect(_nm,_q0,'رصيد افتتاحي',0,_x0);}logAction(edit?'تعديل دواء':'إضافة دواء',name,'');save();ov.remove();renderAll();toastSuccess('تم');});}
 function openRestock(id){if(!requirePerm('med.restock')) return;const m=state.medications.find(x=>x.id===id);if(!m) return;const suggested=Math.max((m.minQty||10)*3-(m.qty||0),10);const body=`<div style="padding:10px;background:var(--primary-50);border-radius:9px;margin-bottom:12px;font-weight:700;font-size:12.5px"><b>${esc(m.name)}</b> — متوفر: ${m.qty||0} · اقتراح: ${suggested}</div><form id="rsf"><div class="form-grid"><div class="field"><label>الكمية</label><input type="number" id="rs-q" min="1" value="${suggested}"></div><div class="field"><label>المورد</label><input id="rs-p"></div><div class="field full"><label>تاريخ انتهاء الصلاحية (اختياري)</label><input type="date" id="rs-ex"></div><div class="field full"><label>سعر الوحدة (تكلفة)</label><input type="number" id="rs-price" step="0.01" min="0" value="0"></div><div class="field full"><label>سعر البيع للمريض (يُضاف للفاتورة عند الصرف)</label><input type="number" id="rs-sell" step="0.01" min="0" value="${m.price||0}"></div></div><div style="display:flex;gap:10px;margin-top:14px"><button type="submit" class="btn primary">📥 توريد</button><button type="button" class="btn ghost" data-close>إلغاء</button></div></form>`;const ov=openModal({title:'📥 توريد',body});ov.querySelector('#rsf').addEventListener('submit',e=>{e.preventDefault();const q=Number(ov.querySelector('#rs-q').value),v=ov.querySelector('#rs-p').value.trim(),price=Number(ov.querySelector('#rs-price').value),sp=Number(ov.querySelector('#rs-sell').value),expiry=ov.querySelector('#rs-ex').value;if(!Number.isInteger(q)||q<=0||!v||!Number.isFinite(price)||price<0||!Number.isFinite(sp)||sp<0){toastWarn('أدخل كمية صحيحة وموردًا وأسعارًا غير سالبة');return;}if(expiry&&(!/^\d{4}-\d{2}-\d{2}$/.test(expiry)||isNaN(new Date(expiry+'T00:00:00').getTime())||expiry<todayISO())){toastWarn('تاريخ الصلاحية غير صالح أو منتهي');return;}const _bb=stockIn(m,q,v,price,expiry);if(!_bb){toastError('تعذر تسجيل التوريد؛ لم يتم حفظ الحركة');return;}m.price=sp;state.purchases.push({batchId:_bb.id,by:state.currentUser?.name||'',at:new Date().toISOString(),id:'pu'+uid(),date:todayISO(),vendor:v,item:m.name,qty:q,unitPrice:price,total:roundMoney(q*price),status:'pending',payments:[],medicineId:m.id});logAction('توريد دواء',m.name,`+${q}`);save();ov.remove();renderAll();toastSuccess('تم');});}
-function openMedReturn(){if(!requirePerm('med.dispense')) return;const L=state.prescriptions.filter(r=>(r.status==='dispensed'||r.status==='partial')&&r.items.some(i=>((i.dispensed!==undefined?i.dispensed:i.qty)-(i.returned||0))>0)).slice(-30).reverse();if(!L.length){toastWarn('لا روشتات مصروفة قابلة للإرجاع');return;}
-const ov=openModal({title:'↩️ مرتجع دواء',body:'<div class="field"><label>الروشتة</label><select id="mr-rx">'+L.map(r=>`<option value="${r.id}">${esc(r.patientName)} — ${fmtDate(r.dispensedAt)}</option>`).join('')+'</select></div><div id="mr-it"></div><div class="field"><label>حالة المرتجع</label><select id="mr-st"><option value="restock">سليم — يُعاد للمخزون الصالح</option><option value="hold">حجر للفحص — لا يُتاح حتى يُفحص</option><option value="damaged">تالف/غير صالح — لا يُعاد للمخزون</option></select></div><div class="field"><label>سبب الإرجاع</label><input id="mr-why"></div>',footer:'<button class="btn ghost" data-close>إلغاء</button><button class="btn primary" id="mr-ok">تأكيد المرتجع</button>'});
-const draw=()=>{const r=state.prescriptions.find(x=>x.id===ov.querySelector('#mr-rx').value);ov.querySelector('#mr-it').innerHTML=r.items.map((i,k)=>{const mx=(i.dispensed!==undefined?i.dispensed:i.qty)-(i.returned||0);return mx>0?`<div style="display:flex;gap:8px;align-items:center;margin-bottom:6px"><span style="flex:1;font-size:12.5px;font-weight:700">${esc(i.medicineName)} <small>(حتى ${mx})</small></span><input type="number" data-k="${k}" min="0" max="${mx}" value="0" style="width:80px"></div>`:'';}).join('');};
-ov.querySelector('#mr-rx').onchange=draw;draw();
-ov.querySelector('#mr-ok').onclick=()=>{const r=state.prescriptions.find(x=>x.id===ov.querySelector('#mr-rx').value);const why=ov.querySelector('#mr-why').value.trim();if(!why){toastWarn('اكتب سبب الإرجاع');return;}const _st=(ov.querySelector('#mr-st')||{}).value||'restock';let n=0;
-ov.querySelectorAll('[data-k]').forEach(inp=>{const it=r.items[+inp.dataset.k];const q=Math.min(Math.max(parseInt(inp.value)||0,0),(it.dispensed!==undefined?it.dispensed:it.qty)-(it.returned||0));const m=state.medications.find(x=>x.id===it.medicineId);if(!q||!m) return;
-const _al=_retAlloc(r,it,m,q);reconcileB(m);if(_st==='restock'){m.qty=(m.qty||0)+q;_retPlace(m,_al,false);syncExpiry(m);}else if(_st==='hold'){_retPlace(m,_al,true,{rxId:r.id,patientId:r.patientId});}it.returned=(it.returned||0)+q;logMove(m,_st==='restock'?'return':_st==='hold'?'hold':'waste','patient',_st==='restock'?'pharmacy':_st==='hold'?'hold':'',q,r.patientName+' — '+why+(_st==='restock'?'':_st==='hold'?' (محجوز للفحص)':' (مرتجع تالف — لم يُعد للمخزون)'),{returnState:_st,batches:_al.map(x=>({no:x.no,batchId:x.batchId||'',expiry:x.expiry,q:x.q})),unitPrice:m.price||0,total:roundMoney((m.price||0)*q)});
-const _up=(it.unitPrice!==undefined?it.unitPrice:(m.price||0));const inv=curInv(r.patientId);if(inv&&_up>0){const py=getPayer((getPatient(r.patientId)||{}).payerId),tot=roundMoney(_up*q);inv.items.push({name:'مرتجع دواء: '+m.name,price:-_up,qty:q,total:-tot,ins:-(py&&py.coverage>0?roundMoney(tot*py.coverage/100):0),date:new Date().toISOString(),kind:'return',doctorId:'',roomNum:null});recalcInv(inv);
-if(inv.paid>inv.total){const rf=roundMoney(inv.paid-inv.total);const _rid='rf'+uid(),_lp=(inv.payments||[]).slice().reverse().find(x=>x.amount>0);const _rr={id:_rid,ref:nextSeq('rfSeq','RF-'),type:'refund',amount:-rf,date:new Date().toISOString(),method:'refund',refundMethod:'cash',reason:'مرتجع دواء — '+why,refundOf:_lp&&_lp.id||null,by:state.currentUser?.name||'—',byId:state.currentUser?.id||'',invoiceId:inv.id,patientId:inv.patientId,visitKey:inv.visitKey||''};try{const _cmv=cashMove({direction:'out',amount:rf,method:'cash',sourceType:'refund',sourceId:_rid,idempotencyKey:'rf:'+_rid});if(_cmv) _rr.cashMovementId=_cmv.id;}catch(e){}inv.payments.push(_rr);inv.paid=roundMoney(inv.paid-rf);}inv.status=inv.paid>=inv.total&&inv.total>0?'paid':inv.paid>0?'partial':'pending';}n++;});
-if(!n){toastWarn('حدد كمية');return;}logAction('مرتجع دواء',r.patientName,why);save();ov.remove();renderAll();toastSuccess('تم المرتجع وتعديل المخزون والفاتورة');};}
+async function openInventoryReconciliation(){
+  if(!requirePerm('med.view')) return;
+  const ov=openModal({title:'📊 مطابقة أرصدة المخزون',body:'<div style="padding:18px;text-align:center;color:var(--muted)">جارٍ جلب المطابقة من قاعدة البيانات...</div>'});
+  try{
+    const report=await window.HospitalCloud.getInventoryReconciliation();
+    const money=n=>Number(n||0).toLocaleString('ar-EG',{maximumFractionDigits:2});
+    const escName=s=>String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const labels={store_batch_mismatch:'فرق رصيد المخزن والدفعات',pharmacy_batch_mismatch:'فرق رصيد الصيدلية والدفعات',expired_stock:'مخزون منتهي الصلاحية',expiring_within_30_days:'صلاحية خلال 30 يومًا',negative_batch_balance:'رصيد دفعة سالب'};
+    const rows=(report.issues||[]).map(r=>`<tr><td>${escName(r.name)}</td><td>${money(r.system.store)} / ${money(r.batches.store)}</td><td>${money(r.system.pharmacy)} / ${money(r.batches.pharmacy)}</td><td>${money(r.expiredQty)}</td><td>${money(r.expiringQty)}</td><td>${r.issues.map(x=>labels[x]||x).join('، ')}</td></tr>`).join('');
+    const s=report.summary||{},t=report.totals||{};
+    const csvRows=[['الدواء','رصيد المخزن بالنظام','رصيد المخزن بالدفعات','رصيد الصيدلية بالنظام','رصيد الصيدلية بالدفعات','منتهي','قارب الانتهاء','المشكلات'],...(report.rows||[]).map(r=>[r.name,r.system.store,r.batches.store,r.system.pharmacy,r.batches.pharmacy,r.expiredQty,r.expiringQty,r.issues.join('|')])];
+    const csv='\uFEFF'+csvRows.map(r=>r.map(v=>'"'+String(v??'').replace(/"/g,'""')+'"').join(',')).join('\r\n');
+    const csvUrl='data:text/csv;charset=utf-8,'+encodeURIComponent(csv);
+    ov.querySelector('.modal-body').innerHTML=`<div class="kpi-strip" style="grid-template-columns:repeat(2,minmax(0,1fr))"><div class="kcard"><div class="kc-b"><div class="kc-v">${s.medicineCount||0}</div><div class="kc-l">عدد الأصناف</div></div></div><div class="kcard"><div class="kc-b"><div class="kc-v" style="color:${s.issueMedicineCount?'var(--danger)':'var(--success)'}">${s.issueMedicineCount||0}</div><div class="kc-l">أصناف بها ملاحظات</div></div></div><div class="kcard"><div class="kc-b"><div class="kc-v">${money(s.expiredMedicineCount||0)}</div><div class="kc-l">أصناف بها منتهي</div></div></div><div class="kcard"><div class="kc-b"><div class="kc-v">${money(s.expiringMedicineCount||0)}</div><div class="kc-l">أصناف قاربت صلاحيتها</div></div></div></div><div class="alert ${s.issueMedicineCount?'warn':'success'}" style="margin:10px 0"><span class="ic">ℹ️</span><div>مطابقة قراءة فقط — إصدار قاعدة البيانات ${report.revision}. إجمالي الدفعات: المخزن ${money(t.batchStore)}، الصيدلية ${money(t.batchPharmacy)}. لا يتم تعديل أي رصيد تلقائيًا.</div></div><div style="display:flex;justify-content:flex-end;margin:8px 0"><a class="btn ghost sm" download="pharmacy_inventory_reconciliation.csv" href="${csvUrl}">⬇️ تصدير CSV</a></div><div class="table-wrap"><table><thead><tr><th>الصنف</th><th>المخزن (نظام/دفعات)</th><th>الصيدلية (نظام/دفعات)</th><th>منتهي</th><th>قارب</th><th>الملاحظات</th></tr></thead><tbody>${rows||'<tr><td colspan="6" class="empty">لا توجد فروق أو ملاحظات في الأرصدة الحالية</td></tr>'}</tbody></table></div><p class="sub" style="margin-top:10px">تم احتساب المطابقة من أرصدة الصنف مقابل مجموع أرصدة دفعاته، مع عرض ملخص حركات المخزون. لا يمكن استنتاج رصيد افتتاحي تاريخي من الحركات وحدها، لذلك لا يتم اعتبار مجموع الحركات رصيدًا دفتريًا نهائيًا.</p>`;
+  }catch(err){ov.querySelector('.modal-body').innerHTML=`<div class="alert danger"><span class="ic">⚠️</span><div>${String(err&&err.message||'تعذر تحميل تقرير المطابقة')}</div></div>`;}
+}
+
+async function openMedReturn(){
+  if(!requirePerm('med.dispense')) return;
+  if(!(window._cloudBootstrapped&&window.HospitalCloud?.status().authenticated)){toastError('مرتجع الأدوية يتطلب اتصالاً مباشرًا بقاعدة البيانات');return;}
+  const L=state.prescriptions.filter(r=>(r.status==='dispensed'||r.status==='partial')&&r.items.some(i=>((i.dispensed!==undefined?i.dispensed:i.qty)-(i.returned||0))>0)).slice(-50).reverse();
+  if(!L.length){toastWarn('لا توجد روشتات مصروفة بكميات قابلة للإرجاع');return;}
+  const ov=openModal({title:'↩️ مرتجع دواء — حفظ خادمي',size:'lg',body:'<div class="field"><label>الروشتة</label><select id="mr-rx">'+L.map(r=>`<option value="${esc(r.id)}">${esc(r.patientName)} — ${fmtDate(r.dispensedAt||r.date)}</option>`).join('')+'</select></div><div id="mr-it"></div><div class="field"><label>مصير المرتجع</label><select id="mr-st"><option value="restock">سليم وغير منتهي — إعادة للمخزون الصالح</option><option value="hold">حجر للفحص — لا يُتاح للصرف</option><option value="damaged">تالف/غير صالح — لا يُعاد للمخزون</option></select></div><div class="field"><label>التسوية المالية</label><select id="mr-fin"><option value="credit">إثبات رصيد دائن للمريض (بدون رد نقدي)</option><option value="cash">رد نقدي من الصندوق إذا كان هناك رصيد مستحق</option></select></div><div class="field"><label>سبب الإرجاع *</label><input id="mr-why" maxlength="500" placeholder="اكتب سبب الإرجاع"></div><div class="alert info" style="margin-top:8px">يتم تسجيل المرتجع وإشعار الدائن والقيد المحاسبي، وتحديث المخزون في عملية خادمية واحدة. الرد النقدي يقتصر على الزيادة الجديدة في رصيد المريض الدائن الناتجة عن هذا المرتجع، ولا يتجاوزها.</div>',footer:'<button class="btn ghost" data-close>إلغاء</button><button class="btn primary" id="mr-ok">تأكيد المرتجع</button>'});
+  const draw=()=>{const r=state.prescriptions.find(x=>x.id===ov.querySelector('#mr-rx').value);if(!r)return;ov.querySelector('#mr-it').innerHTML=r.items.map((i,k)=>{const mx=Math.max(0,(i.dispensed!==undefined?i.dispensed:i.qty)-(i.returned||0));return mx>0?`<div style="display:flex;gap:8px;align-items:center;margin-bottom:7px;padding:8px;background:var(--surface);border-radius:8px"><span style="flex:1;font-size:12.5px;font-weight:700">${esc(i.medicineName)} <small>(المتاح للإرجاع ${mx})</small></span><input type="number" data-k="${k}" min="0" max="${mx}" value="0" style="width:86px"></div>`:'';}).join('')||'<div class="empty">لا توجد كميات متبقية للإرجاع</div>';};
+  ov.querySelector('#mr-rx').onchange=draw;draw();
+  ov.querySelector('#mr-ok').onclick=async()=>{if(ov._busy)return;const rxId=ov.querySelector('#mr-rx').value,why=ov.querySelector('#mr-why').value.trim(),status=ov.querySelector('#mr-st').value,settlementMode=ov.querySelector('#mr-fin').value;if(why.length<3){toastWarn('اكتب سببًا واضحًا للإرجاع');return;}const quantities={};ov.querySelectorAll('[data-k]').forEach(i=>quantities[i.dataset.k]=Math.max(0,parseInt(i.value)||0));if(!Object.values(quantities).some(x=>x>0)){toastWarn('حدد كمية واحدة على الأقل');return;}if(status==='restock'&&!await appConfirm('تأكيد أن الأدوية المرتجعة سليمة، غير مفتوحة، محفوظة بطريقة صحيحة وغير منتهية الصلاحية؟'))return;
+    ov._busy=true;const btn=ov.querySelector('#mr-ok');btn.disabled=true;btn.textContent='جارٍ الحفظ على الخادم…';
+    try{const requestKey='rx-return:'+rxId+':'+Date.now()+':'+uid();const result=await HospitalCloud.returnPrescription(rxId,quantities,status,why,requestKey,settlementMode);const fresh=await HospitalCloud.load();state={...state,...fresh.state,currentUser:state.currentUser};ov.remove();renderAll();toastSuccess('تم تسجيل المرتجع والتسوية المالية على الخادم'+(result.financial?.refund?' — رد نقدي '+fmtMoney(result.financial.refund):result.financial?.patientCredit?' — رصيد دائن '+fmtMoney(result.financial.patientCredit):''));}
+    catch(e){toastError('⛔ '+(e.message||'فشل تسجيل المرتجع؛ لم يتم اعتماد العملية'));ov._busy=false;btn.disabled=false;btn.textContent='تأكيد المرتجع';}
+  };
+}
 /* ===== صرف موحد: كامل/جزئي، ذري، مع حراسة الحالة (إضافة) ===== */
 function rxItemRemaining(it){return Math.max(0,(parseInt(it.qty)||0)-(parseInt(it.dispensed)||0));}
 function rxAllergyHits(rx){const p=getPatient(rx.patientId);const al=(p?p.allergies:[]||[]).map(a=>String(a).trim().toLowerCase()).filter(Boolean);
   return rx.items.filter(it=>{const m=state.medications.find(x=>x.id===it.medicineId);const n=(m?m.name:it.medicineName||'').toLowerCase();return al.some(a=>n.includes(a));});}
-function dispenseRx(rxId,qtyMap){
+async function dispenseRx(rxId,qtyMap){
   if(!can('med.dispense')) return {ok:false,errors:['لا تملك صلاحية الصرف']};
-  if(window._dispLock) return {ok:false,errors:['عملية صرف قيد التنفيذ']};window._dispLock=1;
+  if(window._dispLock) return {ok:false,errors:['عملية صرف قيد التنفيذ']};
+  window._dispLock=1;
   try{
-    const rx=state.prescriptions.find(r=>r.id===rxId);if(!rx) return {ok:false,errors:['الروشتة غير موجودة']};
-    if(rx.status==='cancelled') return {ok:false,errors:['الروشتة ملغاة']};
-    if(rx.status==='dispensed') return {ok:false,errors:['الروشتة مصروفة بالكامل']};
-    const p=getPatient(rx.patientId);if(!p) return {ok:false,errors:['مريض الروشتة غير موجود']};
-    const plan=[];const errs=[];
-    rx.items.forEach((it,k)=>{const want=qtyMap?(parseInt(qtyMap[k])||0):rxItemRemaining(it);
-      if(want<0){errs.push('كمية سالبة: '+it.medicineName);return;}if(want===0) return;
-      const rem=rxItemRemaining(it);if(want>rem){errs.push(it.medicineName+': المطلوب صرفه أكبر من المتبقي في الروشتة ('+rem+')');return;}
-      const m=state.medications.find(x=>x.id===it.medicineId);if(!m){errs.push(it.medicineName+': الصنف غير موجود بالصيدلية');return;}
-      if(availFresh(m,'pharm')<want||(m.qty||0)<want){errs.push(it.medicineName+': الرصيد الصالح غير كافٍ (المتاح '+Math.min(availFresh(m,'pharm'),m.qty||0)+')');return;}
-      plan.push({it,m,want});});
-    /* نفس الصنف في أكثر من بند: افحص مجموع المطلوب مقابل الرصيد الصالح */
-    const tot={};plan.forEach(x=>{tot[x.m.id]=(tot[x.m.id]||0)+x.want;});
-    Object.keys(tot).forEach(id=>{const m=state.medications.find(x=>x.id===id);const av=Math.min(availFresh(m,'pharm'),m.qty||0);if(tot[id]>av) errs.push(m.name+': مجموع الكمية المطلوبة ('+tot[id]+') أكبر من الرصيد الصالح ('+av+')');});
-    if(errs.length) return {ok:false,errors:errs};
-    if(!plan.length) return {ok:false,errors:['حدد كمية للصرف']};
-    const now=new Date().toISOString();const lines=[];let _chg=0;
-    plan.forEach(({it,m,want})=>{const tk=takeBatches(m,'pharm',want,true);m.qty=Math.max(0,(m.qty||0)-want);syncExpiry(m);
-      const up=(Number(it.unitPrice)>0)?Number(it.unitPrice):(Number(m.price)||0);if(up>0&&!(Number(it.unitPrice)>0)) it.unitPrice=up;it._lineId=it._lineId||('rxi'+uid());it.dispensed=(parseInt(it.dispensed)||0)+want;
-      logMove(m,'dispense','pharmacy','',want,rx.patientName,{unitPrice:up,total:roundMoney(up*want),rxId:rx.id,rxItemId:it._lineId,patientId:rx.patientId,visitId:p.currentVisitId||'',doctorId:rx.doctorId||'',batches:tk.map(x=>({no:x.b.no,batchId:x.b.id||'',expiry:x.b.expiry||'',q:x.q,cost:x.b.cost||0}))});
-      if(up>0){addCharge(rx.patientId,'دواء: '+m.name,up,want,'',null,{sourceType:'rx',sourceId:rx.id,medicineId:m.id});_chg=roundMoney(_chg+roundMoney(up)*want);}lines.push(m.name+' × '+want);});
-    (rx.dispenses=rx.dispenses||[]).push({at:now,by:state.currentUser?.name||'',items:plan.map(x=>({name:x.m.name,q:x.want}))});
-    const done=rx.items.every(it=>rxItemRemaining(it)===0);rx.status=done?'dispensed':'partial';if(done) rx.dispensedAt=now;
-    logAction(done?'صرف روشتة':'صرف جزئي لروشتة',rx.patientName,lines.join('، '));save();return {ok:true,rx,done,charged:_chg};
-  }finally{window._dispLock=0;}}
+    const requestKey='rx-dispense:'+String(rxId)+':'+String(Date.now())+':'+String(uid());
+    const quantities={};Object.keys(qtyMap||{}).forEach(k=>{quantities[k]=Math.max(0,parseInt(qtyMap[k])||0);});
+    const result=await HospitalCloud.dispensePrescription(rxId,quantities,requestKey);
+    const fresh=await HospitalCloud.load();
+    state={...state,...fresh.state,currentUser:state.currentUser};
+    return {ok:true,rx:state.prescriptions.find(r=>String(r.id)===String(rxId)),done:!!result.done,charged:Number(result.charged)||0,idempotent:!!result.idempotent};
+  }catch(e){return {ok:false,errors:[e.message||'تعذر صرف الروشتة على الخادم']};}
+  finally{window._dispLock=0;}
+}
 function openDispense(rxId){if(!requirePerm('med.dispense')) return;const rx=state.prescriptions.find(r=>r.id===rxId);if(!rx) return;
   if(rx.status==='dispensed'||rx.status==='cancelled'){toastWarn(rx.status==='dispensed'?'الروشتة مصروفة بالكامل':'الروشتة ملغاة');return;}
   const hits=rxAllergyHits(rx);
@@ -4007,7 +4366,7 @@ function openDispense(rxId){if(!requirePerm('med.dispense')) return;const rx=sta
   ov.querySelector('#dc').onclick=async()=>{if(ov._busy) return;const btn=ov.querySelector('#dc');
     if(hits.length&&!await appConfirm('⚠️ تنبيه حساسية نصي تجاه: '+hits.map(i=>i.medicineName).join('، ')+'\nهل راجعت الأمر وتريد المتابعة؟')) return;
     ov._busy=true;btn.disabled=true;const q={};ov.querySelectorAll('[data-k]').forEach(i=>q[i.dataset.k]=i.value);
-    const r=dispenseRx(rxId,q);if(!r.ok){toastError('⛔ '+r.errors[0]);ov._busy=false;btn.disabled=false;return;}
+    const r=await dispenseRx(rxId,q);if(!r.ok){toastError('⛔ '+r.errors[0]);ov._busy=false;btn.disabled=false;return;}
     const _cn=!!(ov.querySelector('#dsp-collect')&&ov.querySelector('#dsp-collect').checked);ov.remove();renderAll();toastSuccess(r.done?'تم الصرف':'تم الصرف الجزئي — الروشتة ما زالت مفتوحة للمتبقي');
     {const _p=getPatient(rx.patientId),_i=_p&&curInv(rx.patientId);if(_cn&&r.charged>0&&_i&&_i.total>_i.paid&&can('finance.collect')) setTimeout(()=>openPay(_i.id,r.charged),300);else if(_p&&_p.status==='exited'&&_i&&_i.total>_i.paid){if(can('finance.collect')) setTimeout(()=>openPay(_i.id),300);else toastWarn('⚠️ المريض خرج وعليه مستحق '+fmtMoney(_i.total-_i.paid)+' — حوّله للمحاسب');}}};}
 async function collectFee(pid,m){const inv=curInv(pid);if(!inv||!m) return;const due=roundMoney(inv.total-inv.paid);if(due>0&&await addPayment(inv,due,m)) setTimeout(()=>openReceipt(inv.id,inv.payments.length-1),400);}
@@ -4717,15 +5076,15 @@ if(action==='fix'&&p&&p.roomNo){const before=p.roomNo;p.roomNo=null;logAction('�
 else{logAction('مراجعة: إبقاء ربط الغرفة',p?p.name:r.entityId,r.note||'',{entityType:'patient',entityId:r.entityId,reason});r.status=action==='fix'?'fixed':'kept';}
 r.reason=reason;r.resolvedBy=(state.currentUser&&state.currentUser.name)||'';r.resolvedAt=new Date().toISOString();save();renderReviewTasks();toastSuccess('تم تسجيل القرار');}
 function renderAudit(){const list=document.getElementById('audit-list');if(!list) return;const q=(document.getElementById('audit-q')?.value||'').toLowerCase();const au=document.getElementById('audit-user'),aa=document.getElementById('audit-act');const fillSel=(el,vals)=>{if(!el) return;const cv=el.value;el.innerHTML='<option value="">الكل</option>'+vals.map(v=>`<option>${esc(v)}</option>`).join('');el.value=cv;};fillSel(au,[...new Set(state.auditLog.map(a=>a.user))]);fillSel(aa,[...new Set(state.auditLog.map(a=>a.action))]);let logs=state.auditLog.filter(a=>(!au||!au.value||a.user===au.value)&&(!aa||!aa.value||a.action===aa.value)&&inPeriod('audit',a.time));if(q) logs=logs.filter(a=>`${a.action} ${a.target} ${a.detail} ${a.user}`.toLowerCase().includes(q));const ac=document.getElementById('audit-count');if(ac) ac.textContent='عرض '+Math.min(logs.length,300)+' من '+logs.length+' سجل (إجمالي '+state.auditLog.length+')';if(!logs.length){list.innerHTML='<div class="empty"><span class="icon">📋</span><p>لا سجلات</p></div>';return;}list.innerHTML=logs.slice(0,300).map(a=>`<div style="display:flex;gap:10px;padding:10px 4px;border-bottom:1px solid var(--border-soft)"><div style="width:32px;height:32px;border-radius:8px;background:var(--primary-50);color:var(--primary);display:grid;place-items:center;flex-shrink:0;font-size:14px">📝</div><div style="flex:1;min-width:0"><div style="font-size:12.5px;font-weight:800;margin-bottom:2px">${esc(a.action)}${a.target?` — ${esc(a.target)}`:''}</div>${a.detail?`<div style="font-size:11px;color:var(--muted);font-weight:600">${esc(a.detail)}</div>`:''}<div style="font-size:10px;color:var(--faint);font-weight:700;margin-top:3px">👤 ${esc(a.user)} · 📅 ${fmtDT(a.time)}</div></div></div>`).join('');}
-function _deviceId(){try{let d=localStorage.getItem(STORAGE_KEY+'_dev');if(!d){d='dev-'+uid();localStorage.setItem(STORAGE_KEY+'_dev',d);}return d;}catch(e){return 'dev-unknown';}}
+function _deviceId(){try{let d=__localStorageDisabled.getItem(STORAGE_KEY+'_dev');if(!d){d='dev-'+uid();__localStorageDisabled.setItem(STORAGE_KEY+'_dev',d);}return d;}catch(e){return 'dev-unknown';}}
 function _sessionId(){if(!window.__sid) window.__sid='ses-'+uid();return window.__sid;}
 /* V11-SEC-003: سجل تدقيق موسّع (append-only). extra: {entityType,entityId,before,after,reason,result} */
 function logAction(action,target,detail,extra){const x=extra||{};state.auditLog.unshift({id:uid(),time:new Date().toISOString(),user:state.currentUser?.name||'—',userId:state.currentUser?.id||'',sessionId:_sessionId(),deviceId:_deviceId(),requestId:'rq'+uid(),action,target:target||'',detail:detail||'',entityType:x.entityType||'',entityId:x.entityId||'',before:x.before===undefined?null:x.before,after:x.after===undefined?null:x.after,reason:x.reason||'',result:x.result||'ok'});if(state.auditLog.length>1000){(state.auditLogArchive=state.auditLogArchive||[]).push(...state.auditLog.slice(1000));state.auditLog=state.auditLog.slice(0,1000);}}
 const SNAP_KEY=STORAGE_KEY+'_snaps';
 function backupData(){const data={...state,currentUser:null};data.users=(data.users||[]).map(u=>{const c={...u};delete c.password;delete c.passwordSalt;return c;});return {_meta:{app:'his',v:3,exportedAt:new Date().toISOString(),by:state.currentUser?.name||'',counts:{patients:state.patients.length,invoices:state.invoices.length,meds:state.medications.length},note:'Passwords stripped from backup'},...data};}
 function exportBackup(){const d=backupData();const blob=new Blob([JSON.stringify(d)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`hospital_${todayISO()}_${new Date().toTimeString().slice(0,5).replace(':','-')}.json`;document.body.appendChild(a);a.click();a.remove();state.lastBackupAt=new Date().toISOString();save();try{renderBackupInfo();}catch(e){}toastSuccess('تم تنزيل النسخة الاحتياطية');}
-function readSnaps(){try{const x=JSON.parse(localStorage.getItem(SNAP_KEY)||'[]');return Array.isArray(x)?x.filter(z=>z&&typeof z==='object'&&typeof z.data==='string'&&z.day):[];}catch(e){return [];}}
-function takeSnapshot(force){try{const L=readSnaps();const day=todayISO();if(!force&&L.length&&L[L.length-1].day===day) return true;const copy={...state,currentUser:null,users:(state.users||[]).map(u=>{const c={...u};delete c.password;delete c.passwordSalt;return c;})};const entry={day,at:new Date().toISOString(),n:(state.patients||[]).length,data:JSON.stringify(copy)};let saved=false,lastError=null;for(const next of [L.concat(entry).slice(-3),L.concat(entry).slice(-2),[entry]]){try{localStorage.setItem(SNAP_KEY,JSON.stringify(next));const verify=readSnaps();if(verify.some(x=>x.at===entry.at&&x.data===entry.data)){saved=true;break;}}catch(e){lastError=e;}}if(!saved) throw lastError||new Error('تعذر التحقق من النسخة المحفوظة');return true;}catch(e){console.error('Snapshot failed:',e);return false;}}
+function readSnaps(){try{const x=JSON.parse(__localStorageDisabled.getItem(SNAP_KEY)||'[]');return Array.isArray(x)?x.filter(z=>z&&typeof z==='object'&&typeof z.data==='string'&&z.day):[];}catch(e){return [];}}
+function takeSnapshot(force){try{const L=readSnaps();const day=todayISO();if(!force&&L.length&&L[L.length-1].day===day) return true;const copy={...state,currentUser:null,users:(state.users||[]).map(u=>{const c={...u};delete c.password;delete c.passwordSalt;return c;})};const entry={day,at:new Date().toISOString(),n:(state.patients||[]).length,data:JSON.stringify(copy)};let saved=false,lastError=null;for(const next of [L.concat(entry).slice(-3),L.concat(entry).slice(-2),[entry]]){try{__localStorageDisabled.setItem(SNAP_KEY,JSON.stringify(next));const verify=readSnaps();if(verify.some(x=>x.at===entry.at&&x.data===entry.data)){saved=true;break;}}catch(e){lastError=e;}}if(!saved) throw lastError||new Error('تعذر التحقق من النسخة المحفوظة');return true;}catch(e){console.error('Snapshot failed:',e);return false;}}
 function backupIssues(d){const E=[],W=[];if(!d||typeof d!=='object'||Array.isArray(d)) return {errors:['الملف ليس كائن بيانات'],warnings:[]};
  const A=['patients','invoices','medications','users','prescriptions','appointments','doctors','rooms','stockMoves','purchases','auditLog'];
  for(const k of A){if(d[k]!==undefined&&!Array.isArray(d[k])) E.push('الحقل '+k+' يجب أن يكون قائمة');}
@@ -4768,7 +5127,7 @@ async function wipeData(){
     try{const _b=new Blob([JSON.stringify({...state,currentUser:null})],{type:'application/json'});const _a=document.createElement('a');_a.href=URL.createObjectURL(_b);_a.download='pre_wipe_backup_'+todayISO()+'_'+Date.now()+'.json';_a.click();}catch(e){toastError('تعذر إنشاء نسخة ما قبل المسح — أُلغي المسح');return;}
     logAction('مسح كل البيانات',state.currentUser?.name||'','',{reason:'تأكيد مزدوج + نسخة طوارئ'});}
   state=defaultState();
-  try{localStorage.removeItem(SNAP_KEY);localStorage.removeItem(STORAGE_KEY+'_la');}catch(e){}
+  try{__localStorageDisabled.removeItem(SNAP_KEY);__localStorageDisabled.removeItem(STORAGE_KEY+'_la');}catch(e){}
   ensureRooms();
   save();
   document.getElementById('app').style.display='none';
@@ -4894,20 +5253,25 @@ function setDocShareBasis(v){if(!requirePerm('settings.doctors')){const s=docume
 function docDueAll(f,t){return orPayees().map(d=>{const all=docRows(f,t,d.id);const vis=all.filter(x=>x.kind==='visit');const sur=all.filter(x=>x.kind==='surgery');const ana=all.filter(x=>x.kind==='anesth');const tm=all.filter(x=>x.kind==='surgery_team');const vPaid=roundMoney(vis.reduce((a,x)=>a+x.paid,0));const sPaid=roundMoney(sur.reduce((a,x)=>a+x.paid,0));const aPaid=roundMoney(ana.reduce((a,x)=>a+x.paid,0));const tPaid=roundMoney(tm.reduce((a,x)=>a+x.paid,0));const tBase=roundMoney(tm.reduce((a,x)=>a+x.base,0));const vSh=docShare(d);const sSh=(d.surgeryShare!==undefined?d.surgeryShare:60);const aSh=(d.anesthShare!==undefined?d.anesthShare:50);return {d,nTeam:tm.length,n:vis.length+sur.length+tm.length,paid:roundMoney(vPaid+sPaid+tBase),due:roundMoney(vPaid*vSh/100+sPaid*sSh/100+tPaid),breakdown:{visits:vPaid*vSh/100,surgeries:sPaid*sSh/100,anesth:0,team:tPaid}};});}
 const _kp=(ic,bg,col,v,l)=>`<div class="kpi" style="cursor:default"><div class="kpi-icon" style="background:${bg};color:${col}">${ic}</div><div class="kpi-data"><div class="kpi-val" style="font-size:15px">${v}</div><div class="kpi-lbl">${l}</div></div></div>`;
 /* V12-P9: معاملة تسوية الطبيب — إعادة احتساب المستحق وتسجيل الخزينة قبل اعتماد التسوية. */
-function commitDoctorSettlement(did,month,amount,method,overrideReason){
+async function commitDoctorSettlement(did,month,amount,method,overrideReason){
   if(!requirePerm('finance.add')) return {ok:false,error:'لا تملك صلاحية الصرف'};
   const d=getDoctor(did);if(!d||!/^[0-9]{4}-[0-9]{2}$/.test(month||'')) return {ok:false,error:'الطبيب أو الشهر غير صالح'};
   const a=Number(amount);if(!Number.isFinite(a)||a<=0) return {ok:false,error:'مبلغ التسوية غير صالح'};
   if(!method) return {ok:false,error:'طريقة الصرف مطلوبة'};
-  state.settlements=state.settlements||[];
-  const [f,t]=mRange(month),row=docDue(f,t,true).find(x=>x.d.id===did),due=roundMoney(row?row.due:0);
-  const paid=roundMoney(state.settlements.filter(z=>z.doctorId===did&&z.month===month).reduce((x,z)=>x+(Number(z.amount)||0),0));
-  const remaining=roundMoney(due-paid);
-  if(a>remaining+0.001) return {ok:false,error:'المبلغ يتجاوز المستحق الحالي؛ المتبقي '+fmtMoney(Math.max(0,remaining))};
-  const rec={id:'st'+uid(),doctorId:did,month,amount:roundMoney(a),method,date:new Date().toISOString(),by:state.currentUser?.name||'',...(overrideReason?{overrideReason}:{})};
-  const mv=cashMove({direction:'out',amount:rec.amount,method,sourceType:'doctor_settlement',sourceId:rec.id,idempotencyKey:'st:'+rec.id});
-  if(!mv) return {ok:false,error:'تعذر تسجيل حركة الخزينة؛ لم يتم اعتماد التسوية'};
-  rec.cashMovementId=mv.id;state.settlements.push(rec);logAction('صرف مستحقات طبيب',d.name,month+' · '+rec.amount);save();return {ok:true,record:rec,remaining:roundMoney(remaining-rec.amount)};
+  if(window._cloudBootstrapped && window.HospitalCloud?.status().authenticated){
+    const requestKey='doctor-settlement:'+String(did)+':'+String(month)+':'+String(a)+':'+String(Date.now())+':'+String(uid());
+    try{
+      await HospitalCloud.settleDoctor(did,month,a,_cashMethod(method),requestKey,overrideReason||'');
+      const refreshed=await HospitalCloud.refreshState();
+      if(!refreshed?.state) throw new Error('تم تنفيذ الصرف لكن تعذر تحميل الحالة الجديدة');
+      state=Object.assign(defaultState(),refreshed.state);
+      state.currentUser={id:refreshed.user.id,name:refreshed.user.name,username:refreshed.user.username,role:refreshed.user.role,permissions:[...(refreshed.user.permissions||[])],doctorId:refreshed.user.doctorId||''};
+      const rec=(state.settlements||[]).find(x=>String(x.requestKey||'')===requestKey)||null;
+      if(!rec) throw new Error('تم تأكيد الحفظ لكن سجل التسوية غير ظاهر بعد إعادة التحميل');
+      return {ok:true,record:rec,remaining:null};
+    }catch(e){return {ok:false,error:e.message||'فشل حفظ التسوية على الخادم'};}
+  }
+  return {ok:false,error:'لا يوجد اتصال سحابي موثّق؛ لم يتم تسجيل أي صرف محليًا'};
 }
 function openSettlement(){const ov=openModal({title:'🤝 تسوية الأطباء',size:'lg',body:'<div id="sx"></div>'});mountSettlement(ov.querySelector('#sx'));}
 function mountSettlement(host){
@@ -4916,26 +5280,107 @@ function mountSettlement(host){
   const PEN='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
   const shv=d=>(d.share===undefined||d.share===null)?(d.sharesApproved===false?0:70):d.share,ssv=d=>(d.surgeryShare===undefined||d.surgeryShare===null)?(d.sharesApproved===false?0:60):d.surgeryShare;
   const draw=()=>{
-    const m=ov.querySelector('#st-m').value;const [f,t]=mRange(m);const rows=docDue(f,t,true).map(x=>{const pd=roundMoney(state.settlements.filter(z=>z.doctorId===x.d.id&&z.month===m).reduce((a,z)=>a+z.amount,0));return {...x,pd,rem:roundMoney(x.due-pd)};});
+    const m=ov.querySelector('#st-m').value;const [f,t]=mRange(m);const rows=docDue(f,t,true).map(x=>{const pd=roundMoney(state.settlements.filter(z=>z.doctorId===x.d.id&&z.month===m).reduce((a,z)=>a+z.amount,0));const approved=(state.doctorMonthlyApprovals||[]).find(a=>String(a.doctorId)===String(x.d.id)&&String(a.month)===String(m)&&a.status==='approved');const due=approved?Number(approved.approvedDue)||0:x.due;return {...x,currentDue:x.due,due,approved,pd,rem:roundMoney(due-pd),needsAdjustment:!!approved&&Math.abs(roundMoney(x.due-due))>0.009};});
     const T=k=>roundMoney(rows.reduce((a,x)=>a+(x[k]||0),0));const tPaid=T('paid'),tDue=T('due'),tPd=T('pd'),tRem=Math.max(0,roundMoney(tDue-tPd));
     ov.querySelector('#st-k').innerHTML=`<div class="kpi-strip">${_kp('💵','var(--primary-light)','var(--primary-dark)',fmtMoney(tPaid),'إجمالي المحصّل')}${_kp('🧮','var(--blue-bg)','var(--blue-text)',fmtMoney(tDue),'مستحقات الأطباء')}${_kp('✅','var(--success-bg)','var(--success-text)',fmtMoney(tPd),'تم صرفه')}${_kp('⏳','var(--warn-bg)','var(--warn-text)',fmtMoney(tRem),'المتبقي للصرف')}</div>`;
     ov.querySelector('#st-r').innerHTML=`<div class="table-wrap"><table><thead><tr><th>الطبيب</th><th>كشوفات</th><th>المحصّل</th><th>النسب</th><th>المستحق</th><th>المصروف</th><th>الحالة</th><th></th></tr></thead><tbody>${rows.map(x=>{const d=x.d,bd=x.breakdown||{};const pct=x.due>0?Math.min(100,Math.round(x.pd/x.due*100)):0;
-      const st=x.due<=0?'<span class="pill gray">لا مستحقات</span>':x.rem<=0?'<span class="pill paid">✓ مسدّد</span>':x.pd>0?'<span class="pill pending">صرف جزئي</span>':'<span class="pill pending">مستحق</span>';
-      return `<tr><td><div class="st-doc"><div class="st-av">${esc((d.name||'?').replace(/^د[\.\s]*/,'').trim().charAt(0)||'?')}</div><div><b>${esc(d.name)}</b><small>${esc(d.specialty||'')}</small></div></div></td><td>${x.n}</td><td class="cell-money">${fmtMoney(x.paid)}</td><td><button type="button" class="rate-chip" data-rate="${d.id}" title="تعديل النسب"><span class="rc"><small>كشف</small><b>${shv(d)}%</b></span><span class="ed">${PEN}</span></button></td><td class="cell-money">${fmtMoney(x.due)}<div style="font-size:9.5px;color:var(--muted);font-weight:600">كشف ${fmtMoney(bd.visits||0)}</div></td><td><div class="st-prog"><div class="tx">${fmtMoney(x.pd)}</div><div class="tr"><span style="width:${pct}%"></span></div></div></td><td>${st}</td><td>${x.rem>0?`<button class="btn success sm" data-pay="${d.id}" data-amt="${x.rem}">صرف ${fmtMoney(x.rem)}</button>`:''}</td></tr>`;}).join('')||'<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:20px">لا يوجد أطباء</td></tr>'}</tbody></table></div>`;
+      const st=x.due<=0?'<span class="pill gray">لا مستحقات</span>':!x.approved?'<span class="pill pending">بانتظار الاعتماد</span>':x.rem<=0?'<span class="pill paid">✓ مسدّد</span>':x.pd>0?'<span class="pill pending">معتمد · صرف جزئي</span>':'<span class="pill paid">معتمد للصرف</span>';
+      return `<tr><td><div class="st-doc"><div class="st-av">${esc((d.name||'?').replace(/^د[\.\s]*/,'').trim().charAt(0)||'?')}</div><div><b>${esc(d.name)}</b><small>${esc(d.specialty||'')}</small></div></div></td><td>${x.n}</td><td class="cell-money">${fmtMoney(x.paid)}</td><td><button type="button" class="rate-chip" data-rate="${d.id}" title="تعديل النسب"><span class="rc"><small>كشف</small><b>${shv(d)}%</b></span><span class="ed">${PEN}</span></button></td><td class="cell-money">${fmtMoney(x.due)}${x.needsAdjustment?`<div style="font-size:9.5px;color:var(--warn-text);font-weight:700">الحساب الحالي ${fmtMoney(x.currentDue)}</div>`:''}<div style="font-size:9.5px;color:var(--muted);font-weight:600">كشف ${fmtMoney(bd.visits||0)}</div></td><td><div class="st-prog"><div class="tx">${fmtMoney(x.pd)}</div><div class="tr"><span style="width:${pct}%"></span></div></div></td><td>${st}</td><td><button class="btn ghost sm" data-statement="${d.id}" title="كشف حساب الطبيب">كشف الحساب</button> ${x.due>0&&!x.approved?`<button class="btn primary sm" data-approve="${d.id}">اعتماد الشهر</button>`:x.needsAdjustment?`<button class="btn warning sm" data-adjust="${d.id}">اعتماد فرق ${fmtMoney(x.currentDue-x.due)}</button>`:x.rem>0&&x.approved?`<button class="btn success sm" data-pay="${d.id}" data-amt="${x.rem}">صرف ${fmtMoney(x.rem)}</button>`:''}</td></tr>`;}).join('')||'<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:20px">لا يوجد أطباء</td></tr>'}</tbody></table></div>`;
   };
   ov.querySelector('#st-m').onchange=draw;
+  const showDoctorStatement=(doctorId)=>{
+    const m=ov.querySelector('#st-m').value;
+    if(!/^\d{4}-\d{2}$/.test(m)){toastError('اختر شهرًا صحيحًا');return;}
+    const d=getPayee(doctorId);if(!d){toastError('الطبيب غير موجود');return;}
+    const approvals=(state.doctorMonthlyApprovals||[]).filter(x=>String(x.doctorId)===String(doctorId)&&String(x.month)===m).sort((a,b)=>String(a.approvedAt||a.createdAt||'').localeCompare(String(b.approvedAt||b.createdAt||'')));
+    const adjustments=(state.doctorMonthlyAdjustments||[]).filter(x=>String(x.doctorId)===String(doctorId)&&String(x.month)===m).sort((a,b)=>String(a.createdAt||a.date||'').localeCompare(String(b.createdAt||b.date||'')));
+    const settlements=(state.settlements||[]).filter(x=>String(x.doctorId)===String(doctorId)&&String(x.month)===m).sort((a,b)=>String(a.date||'').localeCompare(String(b.date||'')));
+    const journals=(state.journalEntries||[]).filter(j=>{
+      if(String(j.doctorId||'')===String(doctorId)&&String(j.month||'')===m) return true;
+      return settlements.some(st=>String(j.sourceDocumentId||j.sourceId||'')===String(st.id));
+    }).sort((a,b)=>String(a.date||'').localeCompare(String(b.date||'')));
+    const approved=approvals.filter(x=>x.status==='approved').slice(-1)[0];
+    const due=approved?Number(approved.approvedDue)||0:0;
+    const paid=roundMoney(settlements.reduce((a,x)=>a+(Number(x.amount)||0),0));
+    const remaining=roundMoney(due-paid);
+    const fmtDate=v=>v?new Date(v).toLocaleString('ar-EG'):'—';
+    const money=v=>fmtMoney(Number(v)||0);
+    const lineRows=journals.map(j=>`<tr><td>${esc(j.entryNo||j.id||'—')}</td><td>${esc(fmtDate(j.date||j.postedAt))}</td><td>${esc(j.description||'')}</td><td>${esc(j.sourceDocumentType||j.sourceType||'')}</td><td>${money(j.totalDebit)}</td><td>${money(j.totalCredit)}</td></tr>`).join('');
+    const approvalRows=approvals.map(a=>`<tr><td>${esc(fmtDate(a.approvedAt||a.createdAt))}</td><td>${esc(a.status||'—')}</td><td>${money(a.approvedDue)}</td><td>${esc(a.by||a.approvedBy||'—')}</td></tr>`).join('');
+    const adjustmentRows=adjustments.map(a=>`<tr><td>${esc(fmtDate(a.createdAt||a.date))}</td><td>${money(a.oldDue)}</td><td>${money(a.newDue)}</td><td>${money(a.delta)}</td><td>${esc(a.by||a.approvedBy||a.createdBy||'—')}</td></tr>`).join('');
+    const settlementRows=settlements.map(a=>`<tr><td>${esc(fmtDate(a.date))}</td><td>${money(a.amount)}</td><td>${esc(a.method||'—')}</td><td>${esc(a.by||'—')}</td><td>${esc(a.cashMovementId||'—')}</td></tr>`).join('');
+    const report=`<div class="kpi-strip" style="grid-template-columns:repeat(3,minmax(0,1fr))">${_kp('🧾','var(--blue-bg)','var(--blue-text)',money(due),'المستحق المعتمد')}${_kp('✅','var(--success-bg)','var(--success-text)',money(paid),'إجمالي المصروف')}${_kp('⏳','var(--warn-bg)','var(--warn-text)',money(remaining),'المتبقي')}</div>
+      <div class="table-wrap"><h4>سجل الاعتمادات</h4><table><thead><tr><th>التاريخ</th><th>الحالة</th><th>المستحق</th><th>بواسطة</th></tr></thead><tbody>${approvalRows||'<tr><td colspan="4">لا توجد اعتمادات</td></tr>'}</tbody></table></div>
+      <div class="table-wrap"><h4>سجل التعديلات</h4><table><thead><tr><th>التاريخ</th><th>قبل</th><th>بعد</th><th>الفرق</th><th>بواسطة</th></tr></thead><tbody>${adjustmentRows||'<tr><td colspan="5">لا توجد تعديلات</td></tr>'}</tbody></table></div>
+      <div class="table-wrap"><h4>المدفوعات</h4><table><thead><tr><th>التاريخ</th><th>المبلغ</th><th>الطريقة</th><th>بواسطة</th><th>مرجع الحركة</th></tr></thead><tbody>${settlementRows||'<tr><td colspan="5">لا توجد مدفوعات</td></tr>'}</tbody></table></div>
+      <div class="table-wrap"><h4>القيود المحاسبية المرتبطة</h4><table><thead><tr><th>رقم القيد</th><th>التاريخ</th><th>البيان</th><th>النوع</th><th>مدين</th><th>دائن</th></tr></thead><tbody>${lineRows||'<tr><td colspan="6">لا توجد قيود مرتبطة مسجلة في بيانات الشهر</td></tr>'}</tbody></table></div>
+      <p style="font-size:11px;color:var(--muted)">الربط بحساب 2120 مستحقات الأطباء يتم من دفتر اليومية؛ الأرقام أعلاه ملخص مشتق من الاعتمادات والمدفوعات ولا تنشئ رصيدًا محاسبيًا جديدًا. عدد القيود المرتبطة: ${journals.length}.</p>`;
+    const mo=openModal({title:`كشف حساب ${esc(d.name)} — ${esc(m)}`,body:report,footer:'<button class="btn primary" id="st-print">طباعة الكشف</button><button class="btn success" id="st-csv">تصدير CSV</button><button class="btn ghost" data-close>إغلاق</button>',size:'wide'});
+    const csvCell=v=>'"'+String(v??'').replace(/"/g,'""')+'"';
+    mo.querySelector('#st-csv').onclick=()=>{
+      const rows=[['نوع السجل','التاريخ','المرجع','البيان','مدين','دائن','مبلغ'],
+        ...approvals.map(a=>['اعتماد',a.approvedAt||a.createdAt||'',a.id||'',a.status||'', '', '',a.approvedDue||0]),
+        ...adjustments.map(a=>['تعديل',a.createdAt||a.date||'',a.id||'','فرق مستحق','', '',a.delta||0]),
+        ...settlements.map(a=>['صرف',a.date||'',a.id||'',a.method||'', '', '',a.amount||0]),
+        ...journals.map(j=>['قيد',j.date||'',j.entryNo||j.id||'',j.description||'',j.totalDebit||0,j.totalCredit||0,''])];
+      const csv='\ufeff'+rows.map(r=>r.map(csvCell).join(',')).join('\r\n');
+      const url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download=`doctor-${doctorId}-${m}-statement.csv`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+    };
+    mo.querySelector('#st-print').onclick=()=>{
+      const w=window.open('','_blank');if(!w){toastWarn('اسمح بفتح النوافذ المنبثقة للطباعة');return;}
+      w.document.write(`<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><title>كشف حساب ${esc(d.name)} ${esc(m)}</title><style>body{font-family:Arial,sans-serif;padding:24px;color:#111}h2,h3{margin:12px 0}table{width:100%;border-collapse:collapse;margin:12px 0 22px}th,td{border:1px solid #bbb;padding:7px;text-align:right;font-size:12px}.kpi-strip{display:flex;gap:12px;margin:16px 0}.kpi{border:1px solid #ccc;padding:12px;flex:1}</style><h2>مستشفى اليوسف — كشف مستحقات طبيب</h2><h3>${esc(d.name)} — ${esc(m)}</h3>${report}</html>`);w.document.close();w.focus();w.print();
+    };
+  };
   ov.querySelector('#st-r').addEventListener('click',async e=>{
+    const statement=e.target.closest('[data-statement]');if(statement){showDoctorStatement(statement.dataset.statement);return;}
     const rb=e.target.closest('[data-rate]');
     if(rb){
       if(!requirePerm('settings.doctors')) return;const d=getPayee(rb.dataset.rate);if(!d) return;
       const row=(id,t,sub,v)=>`<div class="rate-row"><div><b>${t}</b><small>${sub}</small></div><div class="inp"><input type="number" id="${id}" min="0" max="100" step="0.5" value="${v}" inputmode="decimal"><span>%</span></div></div>`;
-      const mo=openModal({title:'⚙️ نسب '+esc(d.name),body:`<div class="rate-form">${d._k?'':row('rt-v','نسبة الكشف','من المحصّل على الكشوفات والاستشارات',shv(d))}<div style="font-size:11px;color:var(--muted)">النسبة المتبقية من كل بند تعود للمستشفى.</div></div>`,footer:'<button class="btn primary" id="rt-ok" style="flex:1;justify-content:center">حفظ النسب</button><button class="btn ghost" data-close style="justify-content:center">إلغاء</button>'});
-      mo.querySelector('#rt-ok').onclick=()=>{const g=id=>parseFloat(mo.querySelector('#'+id).value);if(d._k){const s2=g('rt-s');if(isNaN(s2)||s2<0||s2>100){toastWarn('النسبة بين 0 و 100');return;}const rec=(state.anesthesiologists||[]).concat(state.orStaff||[]).find(z=>z.id===d.id);if(rec){rec.pct=s2;logAction('تعديل نسبة عمليات',d.name,s2+'%');save();mo.remove();draw();toastSuccess('تم حفظ النسبة');}return;}const v=g('rt-v'),sg=d.surgeryShare??0,a=0;
-        if([v,sg,a].some(n=>isNaN(n)||n<0||n>100)){toastWarn('النسبة لازم تكون بين 0 و 100');return;}
-        d.share=v;logAction('تعديل نسب طبيب',d.name,`كشف ${v}`);save();mo.remove();draw();toastSuccess('تم حفظ النسب');};
+      const mo=openModal({title:'⚙️ نسب '+esc(d.name),body:`<div class="rate-form">${d._k?row('rt-s','نسبة العمليات','من صافي أتعاب العملية',d.pct??0):row('rt-v','نسبة الكشف','من المحصّل على الكشوفات والاستشارات',shv(d))+row('rt-op','نسبة العمليات','من أتعاب العمليات المنسوبة للطبيب',d.surgeryShare??60)}<div style="font-size:11px;color:var(--muted)">أي تعديل يُسجّل بتاريخ سريان جديد، والنسب المعتمدة للفترات السابقة لا تتغير.</div></div>`,footer:'<button class="btn primary" id="rt-ok" style="flex:1;justify-content:center">اعتماد النسب بتاريخ اليوم</button><button class="btn ghost" data-close style="justify-content:center">إلغاء</button>'});
+      mo.querySelector('#rt-ok').onclick=async()=>{const g=id=>parseFloat(mo.querySelector('#'+id)?.value);if(d._k){const s2=g('rt-s');if(!Number.isFinite(s2)||s2<0||s2>100){toastWarn('النسبة بين 0 و 100');return;}toastWarn('تعديل نسب طاقم التخدير والتمريض يحتاج مسار اعتماد مستقل؛ لم يتم تغيير النسبة محليًا.');return;}const v=g('rt-v'),op=g('rt-op');if([v,op].some(n=>!Number.isFinite(n)||n<0||n>100)){toastWarn('النسب لازم تكون بين 0 و 100');return;}const btn=mo.querySelector('#rt-ok');btn.disabled=true;btn.textContent='جارٍ الاعتماد…';try{const requestKey='doctor-rates:'+d.id+':'+String(Date.now())+':'+String(uid());const result=await HospitalCloud.updateDoctorRates(d.id,{visitShare:v,surgeryShare:op},requestKey);const fresh=await HospitalCloud.load();state={...state,...fresh.state,currentUser:state.currentUser};logAction('اعتماد نسب طبيب',d.name,`كشف ${v}% · عمليات ${op}% · ${result.effectiveFrom||''}`);mo.remove();draw();toastSuccess('تم اعتماد النسب على الخادم');}catch(err){btn.disabled=false;btn.textContent='اعتماد النسب بتاريخ اليوم';toastError(err.message||'تعذر اعتماد النسب؛ لم يتم تعديل البيانات محليًا.');}};
       return;
     }
-    const b=e.target.closest('[data-pay]');if(!b) return;if(!requirePerm('finance.add')) return;const d=getPayee(b.dataset.pay),m=ov.querySelector('#st-m').value,a=parseFloat(b.dataset.amt);const _spm=ov.querySelector('#st-pm').value;if(!d||!m||!/^\d{4}-\d{2}$/.test(m)||!Number.isFinite(a)||a<=0){toastError('بيانات التسوية غير صالحة');return;}if(!_spm){toastWarn('اختر طريقة الصرف أولاً');return;}const _lock=window._settlementPayLock=window._settlementPayLock||new Set();if(_lock.has(d.id+'|'+m)){toastWarn('توجد عملية صرف جارية لهذا الطبيب والشهر');return;}let _ovr='';if((state.payroll||[]).some(p=>p.refId==='d:'+d.id&&p.active!==false)){if(!await appConfirm(`⚠️ ${d.name} لديه راتب شهري أيضاً.\nدفع تسوية + راتب قد يكون دفعة مزدوجة.\nالمتابعة تتطلب تأكيداً صريحاً.`)) return;_ovr='راتب + تسوية بموافقة صريحة';}if(!await appConfirm('صرف '+fmtMoney(a)+' لـ '+d.name+'؟')) return;_lock.add(d.id+'|'+m);try{const _res=commitDoctorSettlement(d.id,m,a,_spm,_ovr);if(!_res.ok){toastError(_res.error);draw();return;}draw();try{renderEarnings();}catch(e){}toastSuccess('تم الصرف');}finally{_lock.delete(d.id+'|'+m);}
+    const ab=e.target.closest('[data-approve]');if(ab){
+      if(!requirePerm('finance.add')) return;
+      const d=getPayee(ab.dataset.approve),m=ov.querySelector('#st-m').value;
+      if(!d||!/^[0-9]{4}-[0-9]{2}$/.test(m)){toastError('بيانات اعتماد الشهر غير صالحة');return;}
+      if(!await appConfirm('اعتماد كشف مستحقات '+d.name+' عن '+m+'؟ سيتم تثبيت الاستحقاق محاسبيًا حتى لو لم يتم الصرف.')) return;
+      ab.disabled=true;ab.textContent='جارٍ الاعتماد…';
+      try{
+        const requestKey='doctor-month-approval:'+String(d.id)+':'+String(m)+':'+String(Date.now())+':'+String(uid());
+        await HospitalCloud.approveDoctorMonth(d.id,m,requestKey);
+        const fresh=await HospitalCloud.refreshState();
+        if(!fresh?.state) throw new Error('تعذر تحميل حالة الاعتماد الجديدة');
+        state=Object.assign(defaultState(),fresh.state);
+        state.currentUser={id:fresh.user.id,name:fresh.user.name,username:fresh.user.username,role:fresh.user.role,permissions:[...(fresh.user.permissions||[])],doctorId:fresh.user.doctorId||''};
+        draw();toastSuccess('تم اعتماد كشف الشهر وإثبات الاستحقاق');
+      }catch(err){toastError(err.message||'تعذر اعتماد كشف الشهر');draw();}
+      return;
+    }
+    const adj=e.target.closest('[data-adjust]');if(adj){
+      if(!requirePerm('finance.add')) return;
+      const d=getPayee(adj.dataset.adjust),m=ov.querySelector('#st-m').value;
+      if(!d||!/^[0-9]{4}-[0-9]{2}$/.test(m)){toastError('بيانات تسوية الفرق غير صالحة');return;}
+      const live=docDue(...mRange(m),true).find(x=>String(x.d.id)===String(d.id));
+      const oldApproval=(state.doctorMonthlyApprovals||[]).find(x=>String(x.doctorId)===String(d.id)&&String(x.month)===String(m)&&x.status==='approved');
+      if(!live||!oldApproval){toastError('تعذر تحديد قيمة الفرق');return;}
+      const delta=roundMoney(live.due-Number(oldApproval.approvedDue||0));
+      if(Math.abs(delta)<=0.009){draw();return;}
+      if(!await appConfirm(`المستحق المعتمد السابق: ${fmtMoney(oldApproval.approvedDue)}\nالمستحق بعد التحديث: ${fmtMoney(live.due)}\nفرق التسوية: ${fmtMoney(delta)}\nسيتم تسجيل قيد فرق مستقل. هل تعتمد التعديل؟`)) return;
+      adj.disabled=true;adj.textContent='جارٍ اعتماد الفرق…';
+      try{
+        const requestKey='doctor-month-adjust:'+String(d.id)+':'+String(m)+':'+String(Date.now())+':'+String(uid());
+        await HospitalCloud.adjustDoctorMonth(d.id,m,requestKey);
+        const fresh=await HospitalCloud.refreshState();
+        if(!fresh?.state) throw new Error('تعذر تحميل التعديل الجديد');
+        state=Object.assign(defaultState(),fresh.state);
+        state.currentUser={id:fresh.user.id,name:fresh.user.name,username:fresh.user.username,role:fresh.user.role,permissions:[...(fresh.user.permissions||[])],doctorId:fresh.user.doctorId||''};
+        draw();toastSuccess('تم اعتماد فرق المستحق وتسجيل القيد المحاسبي');
+      }catch(err){toastError(err.message||'تعذر اعتماد فرق المستحق');draw();}
+      return;
+    }
+    const b=e.target.closest('[data-pay]');if(!b) return;if(!requirePerm('finance.add')) return;const d=getPayee(b.dataset.pay),m=ov.querySelector('#st-m').value,a=parseFloat(b.dataset.amt);const _spm=ov.querySelector('#st-pm').value;if(!d||!m||!/^\d{4}-\d{2}$/.test(m)||!Number.isFinite(a)||a<=0){toastError('بيانات التسوية غير صالحة');return;}if(!_spm){toastWarn('اختر طريقة الصرف أولاً');return;}const _lock=window._settlementPayLock=window._settlementPayLock||new Set();if(_lock.has(d.id+'|'+m)){toastWarn('توجد عملية صرف جارية لهذا الطبيب والشهر');return;}let _ovr='';if((state.payroll||[]).some(p=>p.refId==='d:'+d.id&&p.active!==false)){if(!await appConfirm(`⚠️ ${d.name} لديه راتب شهري أيضاً.\nدفع تسوية + راتب قد يكون دفعة مزدوجة.\nالمتابعة تتطلب تأكيداً صريحاً.`)) return;_ovr='راتب + تسوية بموافقة صريحة';}if(!await appConfirm('صرف '+fmtMoney(a)+' لـ '+d.name+'؟')) return;_lock.add(d.id+'|'+m);try{const _res=await commitDoctorSettlement(d.id,m,a,_spm,_ovr);if(!_res.ok){toastError(_res.error);draw();return;}draw();try{renderEarnings();}catch(e){}toastSuccess('تم الصرف');}finally{_lock.delete(d.id+'|'+m);}
   });
   draw();
 }
@@ -5416,20 +5861,24 @@ function openReturnVisit(pid){
   if(!requirePerm('patient.add')) return;const p=getPatient(pid);if(!p) return;
   if(p.status==='active'){toastWarn('المريض لديه زيارة مفتوحة بالفعل');return;}
   if(!state.doctors.length){toastWarn('لا أطباء مسجلين');return;}
-  const inv=curInv(pid);const owe=patientTotalDue(pid);const hist=(p.visits||[]).slice(-4).reverse();
-  const body=`<div style="padding:10px;background:var(--surface);border-radius:10px;margin-bottom:10px"><div style="font-weight:800">${esc(p.name)}</div><div style="font-size:11px;color:var(--muted)">عدد الزيارات: ${(p.visits||[]).length+1} · آخر خروج: ${p.exitDate?fmtDT(p.exitDate):'—'}</div>${owe>0?`<div style="font-size:11.5px;font-weight:800;color:var(--danger-text);margin-top:4px">⚠️ عليه متبقي سابق ${fmtMoney(owe)}</div>`:''}</div>
-  <div class="rx-g2"><div class="field"><label>نوع الزيارة</label><select id="rv-t"><option value="new">🩺 كشف جديد</option><option value="consult">💬 استشارة</option>${isMgr()?'<option value="free">🔁 متابعة بدون رسوم</option>':''}</select></div><div class="field"><label>الطبيب</label><select id="rv-d">${state.doctors.map(d=>`<option value="${d.id}" ${d.id===p.doctorId?'selected':''}>${esc(d.name)}</option>`).join('')}</select></div></div>
+  const owe=patientTotalDue(pid);const hist=(p.visits||[]).slice(-4).reverse();
+  const body=`<div style="padding:10px;background:var(--surface);border-radius:10px;margin-bottom:10px"><div style="font-weight:800">${esc(p.name)}</div><div style="font-size:11px;color:var(--muted)">عدد الزيارات السابقة: ${(p.visits||[]).length+1} · آخر خروج: ${p.exitDate?fmtDT(p.exitDate):'—'}</div>${owe>0?`<div style="font-size:11.5px;font-weight:800;color:var(--danger-text);margin-top:4px">⚠️ عليه متبقي سابق ${fmtMoney(owe)} — سيظل مرتبطًا بالفواتير القديمة</div>`:''}</div>
+  <div class="rx-g2"><div class="field"><label>نوع الزيارة</label><select id="rv-t"><option value="كشف">🩺 كشف جديد</option><option value="استشارة">💬 استشارة</option>${can('patient.free_visit')?'<option value="متابعة">🔁 متابعة بدون رسوم</option>':''}</select></div><div class="field"><label>الطبيب</label><select id="rv-d">${state.doctors.filter(d=>!d.disabled).map(d=>`<option value="${d.id}" ${d.id===p.doctorId?'selected':''}>${esc(d.name)}</option>`).join('')}</select></div></div>
   <div class="field" style="margin-top:10px"><label>الشكوى / سبب الزيارة</label><input id="rv-c"></div><div id="rv-fee" style="font-weight:800;margin:8px 0"></div>
   ${hist.length?`<div style="font-size:11.5px;font-weight:800;margin:8px 0 4px">الزيارات السابقة</div>${hist.map(v=>`<div style="font-size:11px;color:var(--muted);padding:3px 0">${fmtDate(v.entryDate)} · ${esc(v.type||'كشف')} · ${esc(v.doctorName||'')}${v.complaint?' · '+esc(v.complaint):''}</div>`).join('')}`:''}
-  <div style="display:flex;gap:10px;margin-top:12px"><button class="btn primary" id="rv-ok" style="flex:1">✓ فتح الزيارة</button><button class="btn ghost" data-close>إلغاء</button></div>`;
+  <div id="rv-err" style="color:var(--danger-text);font-size:12px;font-weight:700;margin-top:8px"></div>
+  <div style="display:flex;gap:10px;margin-top:12px"><button class="btn primary" id="rv-ok" style="flex:1">✓ فتح الزيارة وحفظها سحابيًا</button><button class="btn ghost" data-close>إلغاء</button></div>`;
   const ov=openModal({title:'🔁 زيارة جديدة',body});const $=q=>ov.querySelector(q);
-  const fee=()=>{const d=getDoctor($('#rv-d').value),t=$('#rv-t').value;return !d?0:t==='new'?(d.fee||0):t==='consult'?consultFeeOf(d):0;};
-  const upd=()=>{$('#rv-fee').textContent='💰 الرسوم: '+fmtMoney(fee());};$('#rv-t').onchange=$('#rv-d').onchange=upd;upd();
-  $('#rv-ok').onclick=()=>{const d=getDoctor($('#rv-d').value),t=$('#rv-t').value;if(!d) return;const lbl={new:'كشف',consult:'استشارة',free:'متابعة'}[t];const f=fee();
-    (p.visits=p.visits||[]).push({entryDate:p.entryDate,exitDate:p.exitDate,doctorId:p.doctorId,doctorName:p.doctorName,complaint:p.complaint,type:p.visitType||'كشف',dischargeStatus:p.dischargeStatus||''});
-    Object.assign(p,{status:'active',dept:'reception',doctorId:d.id,doctorName:d.name,specialty:d.specialty,roomNo:null,seen:false,seenAt:null,calledAt:null,entryDate:new Date().toISOString(),arrivedAt:new Date().toISOString(),currentVisitId:'v'+uid(),exitDate:null,complaint:$('#rv-c').value.trim()||lbl,visitType:lbl,dischargeStatus:'',dischargeNotes:'',creditDischarge:''});
-    if(f>0){addCharge(pid,lbl+' — '+d.name,f,1,d.id);const _iv=curInv(pid);if(_iv&&_iv.total>_iv.paid){if(can('finance.collect')) setTimeout(()=>openPay(_iv.id),500);else toastWarn('⚠️ حوّل المريض للتحصيل: '+fmtMoney(_iv.total-_iv.paid));}}
-    logAction('زيارة جديدة',p.name,lbl+' · '+d.name);save();ov.remove();renderAll();toastSuccess('تم فتح زيارة جديدة');openPatientProfile(pid);};
+  const fee=()=>{const d=getDoctor($('#rv-d').value),t=$('#rv-t').value;return !d?0:t==='كشف'?(d.fee||0):t==='استشارة'?consultFeeOf(d):0;};
+  const upd=()=>{$('#rv-fee').textContent='💰 الرسوم المتوقعة: '+fmtMoney(fee())+' · التحصيل يتم من شاشة التحصيل';};$('#rv-t').onchange=$('#rv-d').onchange=upd;upd();
+  $('#rv-ok').onclick=async()=>{if(ov._busy)return;const d=getDoctor($('#rv-d').value),t=$('#rv-t').value;if(!d){$('#rv-err').textContent='اختر طبيبًا متاحًا';return;}if(!window.HospitalCloud?.status().authenticated){$('#rv-err').textContent='لا يوجد اتصال سحابي مسجل — لم يتم تغيير بيانات المريض';return;}
+    const lbl=t,visitId='v'+uid(),requestKey='return-visit:'+pid+':'+visitId;ov._busy=true;$('#rv-ok').disabled=true;$('#rv-ok').textContent='جارٍ الحفظ على الخادم…';$('#rv-err').textContent='';
+    try{const result=await HospitalCloud.createReturnVisit(pid,visitId,d.id,lbl,$('#rv-c').value.trim(),requestKey);if(!result?.ok||!result.patient)throw new Error('الخادم لم يؤكد فتح الزيارة');
+      const idx=state.patients.findIndex(x=>String(x.id)===String(pid));if(idx<0)throw new Error('تم الحفظ سحابيًا لكن المريض غير موجود في نسخة الشاشة؛ أعد تحميل البيانات');state.patients[idx]=result.patient;
+      if(result.invoice){state.invoices=state.invoices||[];if(!state.invoices.some(x=>x.id===result.invoice.id))state.invoices.push(result.invoice);}
+      ov.remove();renderAll();toastSuccess(result.idempotent?'الزيارة محفوظة بالفعل':'تم فتح الزيارة وحفظها سحابيًا'+(result.invoice?' وإنشاء فاتورة مستقلة':' بدون رسوم'));openPatientProfile(pid);
+    }catch(err){console.error('Return visit cloud transaction failed:',err);$('#rv-err').textContent='⛔ لم يتم فتح الزيارة: '+(err.message||'خطأ اتصال');$('#rv-ok').disabled=false;$('#rv-ok').textContent='إعادة المحاولة';}finally{ov._busy=false;}
+  };
 }
 
 /* ===== حساب الموردين ===== */
@@ -5659,20 +6108,50 @@ function odCompute(o,discount,nursePcts){
   present.forEach(g=>{const tot=roundMoney(net*pct[g]/100),M=grp[g];let acc=0;M.forEach((m,i)=>{let a;if(g==='nursing') a=roundMoney(tot*(+nursePcts[m.staffId])/100);else a=roundMoney(tot/M.length);if(i===M.length-1) a=roundMoney(tot-acc);acc=roundMoney(acc+a);lines.push({id:'odl'+uid(),staffId:m.staffId,name:m.name,role:m.role,group:g,source:'surgery',amount:a});});});
   const hospital=roundMoney(net-lines.reduce((a,l)=>a+l.amount,0));
   return {ok:true,dist:{v:12,gross,discount:disc,net,pctSnap:{...pct},nursePcts:grp.nursing.length?{...nursePcts}:{},lines,hospital,payments:[],status:'approved'}};}
-function odApprove(opId,discount,nursePcts){
+async function odApprove(opId,discount,nursePcts){
   if(!can('or.dist.approve')) return {ok:false,errors:['لا تملك صلاحية اعتماد توزيع العمليات']};
   const o=orGet(opId);if(!o) return {ok:false,errors:['العملية غير موجودة']};
   if(o.status!=='done') return {ok:false,errors:['العملية لم تكتمل']};if(o.dist) return {ok:false,errors:['تم اعتماد التوزيع مسبقاً']};
   if(o.settlement&&!o.dist) return {ok:false,errors:['توجد تسوية قديمة لهذه العملية؛ راجعها أولاً لمنع تكرار المستحقات']};
+  if(window._cloudBootstrapped && window.HospitalCloud?.status().authenticated){
+    try{
+      const requestKey='or-dist-approve:'+String(opId)+':'+String(o.endTime||o.startTime||'');
+      await HospitalCloud.approveOrDistribution(opId,roundMoney(discount||0),nursePcts||{},requestKey);
+      const refreshed=await HospitalCloud.refreshState();
+      if(!refreshed?.state) throw new Error('تم الاعتماد لكن تعذر تحميل الحالة الجديدة');
+      state=Object.assign(defaultState(),refreshed.state);
+      state.currentUser={id:refreshed.user.id,name:refreshed.user.name,username:refreshed.user.username,role:refreshed.user.role,permissions:[...(refreshed.user.permissions||[])],doctorId:refreshed.user.doctorId||''};
+      const fresh=(state.orSchedule||[]).find(x=>String(x.id)===String(opId));
+      if(!fresh?.dist) throw new Error('الخادم لم يرجع التوزيع المعتمد');
+      return {ok:true,dist:fresh.dist};
+    }catch(e){return {ok:false,errors:[e.message||'فشل اعتماد التوزيع على الخادم']};}
+  }
   const r=odCompute(o,discount,nursePcts);if(!r.ok) return r;
   o.dist={...r.dist,approvedBy:state.currentUser?.name||'',approvedAt:new Date().toISOString()};
   logAction('اعتماد توزيع عملية',o.id,'صافي '+fmtMoney(r.dist.net)+' · مستشفى '+fmtMoney(r.dist.hospital));save();return {ok:true,dist:o.dist};}
 function odStatusOf(o,l){const p=odPaidOf(o,l.staffId);return p<=0?'معتمد غير مصروف':p+0.001<l.amount?'مصروف جزئياً':'مصروف بالكامل';}
-function odPay(opId,staffId,amount,method,ref){
+async function odPay(opId,staffId,amount,method,ref){
   if(!can('or.dist.pay')) return {ok:false,errors:['لا تملك صلاحية صرف المستحقات']};
   const o=orGet(opId);if(!o||!o.dist||o.dist.status!=='approved') return {ok:false,errors:['لا يوجد توزيع معتمد']};
   const l=o.dist.lines.find(x=>x.staffId===staffId);if(!l) return {ok:false,errors:['المستفيد غير موجود']};
   const amt=roundMoney(amount),rem=roundMoney(l.amount-odPaidOf(o,staffId));
+  if(window._cloudBootstrapped && window.HospitalCloud?.status().authenticated){
+    if(!(amt>0)) return {ok:false,errors:['المبلغ غير صالح']};
+    if(amt>rem+0.001) return {ok:false,errors:['المبلغ أكبر من المتبقي ('+rem+')']};
+    ref=String(ref||'').trim();if(!ref) return {ok:false,errors:['رقم سند الصرف إجباري']};
+    const requestKey='or-payout:'+String(opId)+':'+String(staffId)+':'+ref;
+    try{
+      await HospitalCloud.payOrStaff(opId,staffId,amt,_cashMethod(method),ref,requestKey);
+      const refreshed=await HospitalCloud.refreshState();
+      if(!refreshed?.state) throw new Error('تم تنفيذ الصرف لكن تعذر تحميل الحالة الجديدة');
+      state=Object.assign(defaultState(),refreshed.state);
+      state.currentUser={id:refreshed.user.id,name:refreshed.user.name,username:refreshed.user.username,role:refreshed.user.role,permissions:[...(refreshed.user.permissions||[])],doctorId:refreshed.user.doctorId||''};
+      const fresh=(state.orSchedule||[]).find(x=>String(x.id)===String(opId));
+      if(!fresh) throw new Error('تم الحفظ لكن تعذر إعادة تحميل العملية');
+      return {ok:true,p:fresh.dist?.payments?.find(x=>String(x.requestKey)===requestKey)||null};
+    }catch(e){return {ok:false,errors:[e.message||'فشل حفظ الصرف على الخادم']};}
+  }
+
   if(!(amt>0)) return {ok:false,errors:['المبلغ غير صالح']};if(amt>rem+0.001) return {ok:false,errors:['المبلغ أكبر من المتبقي ('+rem+')']};
   ref=String(ref||'').trim();if(!ref) return {ok:false,errors:['رقم سند الصرف إجباري']};
   const dup=(state.orSchedule||[]).some(x=>x.dist&&x.dist.payments.some(p=>p.ref===ref));if(dup) return {ok:false,errors:['رقم السند مكرر']};
@@ -5694,7 +6173,7 @@ function odCancel(opId,reason){
   if(!can('or.dist.approve')) return {ok:false,errors:['لا تملك صلاحية']};const o=orGet(opId);if(!o||!o.dist||o.dist.status!=='approved') return {ok:false,errors:['لا يوجد توزيع معتمد']};
   if(odPaidOf(o)>0) return {ok:false,errors:['اعكس دفعات الصرف أولاً']};if(!String(reason||'').trim()) return {ok:false,errors:['السبب إجباري']};
   o.dist.status='cancelled';o.dist.cancelReason=String(reason).trim();o.dist.cancelledBy=state.currentUser?.name||'';o.dist.cancelledAt=new Date().toISOString();logAction('إلغاء توزيع عملية',o.id,reason);save();return {ok:true};}
-function odSaveSettings(v){if(!can('settings.hospital')) return {ok:false,errors:['لا تملك صلاحية']};const k=['surgeon','anesth','assistant','nursing'];if(k.some(x=>!(typeof v[x]==='number'&&v[x]>=0&&v[x]<=100))) return {ok:false,errors:['كل نسبة بين 0 و100']};if(roundMoney(k.reduce((a,x)=>a+v[x],0))>100) return {ok:false,errors:['المجموع يتجاوز 100%']};state.meta=state.meta||{};state.meta.orDistPct={...v};logAction('تعديل نسب توزيع العمليات','orDistPct',JSON.stringify(v));save();return {ok:true};}
+async function odSaveSettings(v){if(!can('settings.hospital')) return {ok:false,errors:['لا تملك صلاحية']};const k=['surgeon','anesth','assistant','nursing'];if(k.some(x=>!(typeof v[x]==='number'&&Number.isFinite(v[x])&&v[x]>=0&&v[x]<=100))) return {ok:false,errors:['كل نسبة بين 0 و100']};if(roundMoney(k.reduce((a,x)=>a+v[x],0))>100) return {ok:false,errors:['المجموع يتجاوز 100%']};if(window._cloudBootstrapped && window.HospitalCloud?.status().authenticated){try{const requestKey='or-rates:'+String(Date.now())+':'+String(uid());const result=await HospitalCloud.updateOrDistributionRates(v,requestKey);const fresh=await HospitalCloud.load();state=Object.assign(defaultState(),fresh.state);state.currentUser={id:fresh.user.id,name:fresh.user.name,username:fresh.user.username,role:fresh.user.role,permissions:[...(fresh.user.permissions||[])],doctorId:fresh.user.doctorId||''};return {ok:true,result};}catch(e){return {ok:false,errors:[e.message||'تعذر اعتماد النسب على الخادم']};}}state.meta=state.meta||{};state.meta.orDistPct={...v};logAction('تعديل نسب توزيع العمليات','orDistPct',JSON.stringify(v));save();return {ok:true};}
 function openOrDues(opId){
   if(!requirePerm('finance.view'))return;
   let current=opId||null,view='detail',targetStaff='',targetPay='';
@@ -5716,10 +6195,10 @@ function openOrDues(opId){
   B.addEventListener('click',async e=>{const b=e.target.closest('button');if(!b)return;
     if(b.dataset.list!==undefined){showList();return;}
     if(b.dataset.open){current=b.dataset.open;draw();return;}
-    if(b.dataset.approve){const o=operation(),np={};B.querySelectorAll('[data-np]').forEach(i=>np[i.dataset.np]=parseFloat(i.value));const discount=parseFloat($v(B,'#od-d'));if(!await appConfirm('اعتماد توزيع المستحقات لهذه العملية؟ لا يمكن تعديله بعد الاعتماد إلا بإلغاء موثق قبل الصرف.'))return;const r=odApprove(b.dataset.approve,discount,np);if(r.ok){toastSuccess('تم اعتماد توزيع المستحقات');draw();}else toastError(r.errors.join(' · '));return;}
+    if(b.dataset.approve){const o=operation(),np={};B.querySelectorAll('[data-np]').forEach(i=>np[i.dataset.np]=parseFloat(i.value));const discount=parseFloat($v(B,'#od-d'));if(!await appConfirm('اعتماد توزيع المستحقات لهذه العملية؟ لا يمكن تعديله بعد الاعتماد إلا بإلغاء موثق قبل الصرف.'))return;const r=await odApprove(b.dataset.approve,discount,np);if(r.ok){toastSuccess('تم اعتماد توزيع المستحقات');draw();}else toastError(r.errors.join(' · '));return;}
     if(b.dataset.editTeam){openORTeam(b.dataset.editTeam,()=>{draw();try{renderORFinancePage();}catch(e){}});return;}
     if(b.dataset.payLine){showPay(b.dataset.payLine);return;}
-    if(b.dataset.payConfirm!==undefined){const o=operation(),amt=parseFloat($v(B,'#od-pay-amount')),m=$v(B,'#od-pay-method'),ref=$v(B,'#od-pay-ref');if(!ref.trim()){toastWarn('رقم سند الصرف إجباري');return;}const r=odPay(o.id,targetStaff,amt,m,ref);if(r.ok){window._orFinMethod=m;toastSuccess('تم الصرف وتسجيل حركة الخزينة');draw();}else toastError(r.errors.join(' · '));return;}
+    if(b.dataset.payConfirm!==undefined){const o=operation(),amt=parseFloat($v(B,'#od-pay-amount')),m=$v(B,'#od-pay-method'),ref=$v(B,'#od-pay-ref');if(!ref.trim()){toastWarn('رقم سند الصرف إجباري');return;}const r=await odPay(o.id,targetStaff,amt,m,ref);if(r.ok){window._orFinMethod=m;toastSuccess('تم الصرف وتسجيل حركة الخزينة');draw();}else toastError(r.errors.join(' · '));return;}
     if(b.dataset.reverse){showReverse(b.dataset.reverse);return;}
     if(b.dataset.reverseConfirm!==undefined){const reason=$v(B,'#od-reverse-reason');if(!reason.trim()){toastWarn('سبب العكس إجباري');return;}if(!await appConfirm('سيتم تسجيل حركة عكس في الخزينة. متابعة؟'))return;const r=odPayReverse(operation().id,targetPay,reason);if(r.ok){toastSuccess('تم عكس الدفعة');draw();}else toastError(r.errors.join(' · '));return;}
     if(b.dataset.cancel){const why=await appPrompt('سبب إلغاء توزيع العملية');if(!why||!why.trim())return;const r=odCancel(b.dataset.cancel,why);if(r.ok){toastSuccess('تم إلغاء التوزيع');draw();}else toastError(r.errors.join(' · '));return;}
@@ -6164,7 +6643,7 @@ function orFileSection(docId,f,t){if(!docId) return '';const L=(state.orSchedule
 function orSplitPreview(){const v=k=>parseFloat(document.getElementById('or-sp-'+k).value)||0;const s=roundMoney(v('surgeon')+v('anesth')+v('staff'));const e=document.getElementById('or-sp-hosp');if(e){e.value=roundMoney(100-s)+'%';e.style.color=s>100?'var(--danger-text)':'';}}
 function saveOrSplit(){if(!requirePerm('settings.doctors')) return;const r={};for(const k of ['surgeon','anesth','staff']){const v=parseFloat(document.getElementById('or-sp-'+k).value);if(!(v>=0&&v<=100)){toastWarn('أدخل نسبة صحيحة (0–100) لكل خانة');return;}r[k]=v;}if(roundMoney(r.surgeon+r.anesth+r.staff)>100){toastWarn('المجموع يتجاوز 100%');return;}state.meta=state.meta||{};state.meta.orSplit=r;logAction('تعديل توزيع نسب العمليات','',`جراح ${r.surgeon} · تخدير ${r.anesth} · طاقم ${r.staff} · مستشفى ${roundMoney(100-r.surgeon-r.anesth-r.staff)}`);save();toastSuccess('تم حفظ التوزيع — يسري على العمليات التي تنتهي بعد الآن');renderSettings();}
 function saveOrRooms(){if(!requirePerm('settings.hospital'))return;const n=parseInt(document.getElementById('or-room-count').value);if(!(n>=1&&n<=30)){toastWarn('العدد بين 1 و30');return;}const oldCount=Math.max(1,Math.min(30,parseInt(state.orRoomCount)||7));const oldNames=Array.isArray(state.orRoomNames)?state.orRoomNames.slice(0,oldCount):[];const names=Array.from({length:n},(_,i)=>String(oldNames[i]||('غرفة عمليات '+(i+1))).trim()||('غرفة عمليات '+(i+1)));if(n<oldCount){const removed=new Set(oldNames.slice(n));const busy=(state.orSchedule||[]).find(o=>OR_ACTIVE.includes(o.status)&&removed.has(o.room));if(busy){toastError('لا يمكن تقليل العدد؛ توجد عملية قائمة في '+busy.room);return;}}state.orRoomCount=n;state.orRoomNames=names;orSyncRooms();logAction('تعديل عدد غرف العمليات','',oldCount+' ← '+n);save();renderAll();renderSettings();toastSuccess('تم حفظ عدد غرف العمليات مع الحفاظ على أسماء الغرف الحالية');}
-function saveOrDistSettings(){const v={};['surgeon','anesth','assistant','nursing'].forEach(k=>v[k]=parseFloat(document.getElementById('or-dist-'+k)?.value));const r=odSaveSettings(v);if(!r.ok){toastError(r.errors.join(' · '));return;}state.meta=state.meta||{};state.meta.orSplit={surgeon:v.surgeon,anesth:v.anesth,staff:v.assistant+v.nursing};save();toastSuccess('تم حفظ نسب تسوية العمليات');renderOrSettings();}
+async function saveOrDistSettings(){const v={};['surgeon','anesth','assistant','nursing'].forEach(k=>v[k]=parseFloat(document.getElementById('or-dist-'+k)?.value));const r=await odSaveSettings(v);if(!r.ok){toastError(r.errors.join(' · '));return;}if(!(window._cloudBootstrapped && window.HospitalCloud?.status().authenticated)){state.meta=state.meta||{};state.meta.orSplit={surgeon:v.surgeon,anesth:v.anesth,staff:v.assistant+v.nursing};save();}toastSuccess('تم حفظ نسب تسوية العمليات بتاريخ سريان جديد');renderOrSettings();}
 function updateOrDistPreview(){const ks=['surgeon','anesth','assistant','nursing'],sum=ks.reduce((a,k)=>a+(parseFloat(document.getElementById('or-dist-'+k)?.value)||0),0),e=document.getElementById('or-dist-hospital');if(e)e.value=(100-sum).toFixed(2)+'%';}
 function renderOrSettings(){const g=id=>document.getElementById(id);if(!g('or-room-count')) return;orSyncRooms();const dp=odPct()||{};['surgeon','anesth','assistant','nursing'].forEach(k=>{const e=g('or-dist-'+k);if(e&&document.activeElement!==e)e.value=dp[k]??'';});const legacyNote=g('or-dist-legacy-note');if(legacyNote)legacyNote.style.display=dp._legacy?'flex':'none';updateOrDistPreview();
   if(g('or-room-count')&&document.activeElement!==g('or-room-count')) g('or-room-count').value=OR_ROOMS.length;
@@ -6213,16 +6692,15 @@ function renderSurgery(){
 }
 function init(){
   state=loadState();
-  if(renderStorageRecovery()) return;
+  window._cloudBootstrapped=false;
   /* V11-SEC-001: لا حسابات افتراضية ولا كلمات مرور معروفة. التثبيت الجديد يبدأ بإعداد أول تشغيل إجباري.
      التثبيتات القديمة التي ما زالت تحمل بصمة كلمة المرور الافتراضية المعروفة تُجبَر على إعداد كلمة جديدة. */
   try{
     const _KNOWN_DEFAULT='h:1d04bce9d3920e8796c7156f16bcddd11a9dc1e497fba855378c7d641a8a53cf';
     (state.users||[]).forEach(u=>{if(u&&u.password===_KNOWN_DEFAULT){u.password='';u.passwordSalt='';u.mustChangePassword=true;u.needsSetup=true;logAction('إبطال كلمة مرور افتراضية معروفة',u.username,'',{entityType:'user',entityId:u.id,reason:'V11-SEC-001'});save();}});
   }catch(_e){console.warn('تعذر فحص كلمات المرور الافتراضية',_e);}
-  /* V12-SEC-SESSION: الجلسة تخص علامة التبويب الحالية ولا تُحفظ داخل قاعدة بيانات localStorage. */
-  const _hadLegacySession=!!state.currentUser;state.currentUser=_readSession();
-  if(!state.currentUser&&_hadLegacySession){_clearSession();save();window._sessionExpired=true;}
+  /* V12-SEC-SESSION: الجلسة تخص علامة التبويب الحالية ولا تُحفظ داخل قاعدة بيانات __localStorageDisabled. */
+  state.currentUser=null; _clearSession();
   let mg=false;if(!state.v2){state.v2=1;mg=true;state.hospitalName='مستشفى الـ يوسف';state.rooms=(state.rooms||[]).filter(r=>r.num<=7||getActiveInRoom(r.num));state.roomCount=7;}ensureRooms();if(mg) save();
   if(!state.apptViewDate) state.apptViewDate=todayISO();
   {const _fr=document.getElementById('first-run-btn');if(_fr) _fr.style.display=adminConfigured()?'none':'';}
@@ -6235,7 +6713,7 @@ function init(){
     bind('pat-q',renderPatients);bind('arch-q',renderArchive);bind('med-q',renderPharmacy);bind('med-filter',renderPharmacy);
     bind('audit-q',renderAudit);bind('audit-user',renderAudit);bind('audit-act',renderAudit);bind('bill-q',renderBilling);mountPeriod('pat',renderPatients);mountPeriod('arch',renderArchive);mountPeriod('audit',renderAudit);mountPeriod('pu',renderInventory,{extras:[{key:'st',label:'السداد',opts:[['','الكل'],['paid','مدفوع بالكامل'],['due','عليه متبقي']]},{key:'v',label:'المورد',opts:()=>[['','كل الموردين'],...vendorStats().map(x=>[x.v,x.v])]},{key:'c',label:'التصنيف',opts:()=>[['','كل التصنيفات'],['أدوية','أدوية'],...PU_CATS.map(c=>[c,c])]}]});mountPeriod('bill',renderBilling);
   },100);
-  if(!adminConfigured()){state.currentUser=null;startFirstRunIfNeeded();}
+  if(!adminConfigured()){state.currentUser=null;const _fr=document.getElementById('first-run-btn');if(_fr)_fr.style.display='none';}
   if(state.currentUser){
     const u=state.users.find(x=>x.id===state.currentUser.id);
     if(u){state.currentUser={id:u.id,name:u.name,username:u.username,role:u.role,permissions:[...(u.permissions||[])],doctorId:u.doctorId||''};enterApp();}
@@ -6249,7 +6727,8 @@ setInterval(()=>{try{if(document.getElementById('page-rooms')?.classList.contain
 document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&String(e.key).toLowerCase()==='k'){e.preventDefault();if(state&&state.currentUser) openSearch();}});
 document.addEventListener('input',e=>{if(e.target?.id?.startsWith('or-dist-'))updateOrDistPreview();});
 document.addEventListener('DOMContentLoaded',()=>{
-    initPasswordEnhancements();const _pwObs=new MutationObserver(ms=>ms.forEach(m=>m.addedNodes.forEach(n=>{if(n.nodeType===1){if(n.matches?.('input[type=\"password\"]'))enhancePasswordInput(n);initPasswordEnhancements(n);}})));_pwObs.observe(document.body,{childList:true,subtree:true});try{init();}catch(e){console.error('Fatal init error:',e);document.body.innerHTML=`<div style="display:grid;place-items:center;min-height:100vh;font-family:Cairo,sans-serif;padding:20px;text-align:center"><div><div style="font-size:48px;margin-bottom:16px">⚠️</div><h1 style="font-size:20px;margin-bottom:8px">خطأ في بدء التشغيل</h1><p style="color:#64748b;margin-bottom:16px">${esc(e.message)}</p><p style=\"color:#64748b;font-size:13px;margin-bottom:12px\">بياناتك لم تُمسح. نزّل نسخة منها أولاً ثم أعد المحاولة.</p><button onclick=\"try{const d=localStorage.getItem(STORAGE_KEY)||'';const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([d],{type:'application/json'}));a.download='hospital_raw_backup_'+Date.now()+'.json';a.click();}catch(e){alert('تعذر تنزيل النسخة')}\" style=\"padding:12px 24px;background:#0f766e;color:#fff;border:0;border-radius:8px;font-weight:800;cursor:pointer;font-family:inherit;margin:4px\">⬇️ تنزيل نسخة من البيانات الحالية</button><button onclick=\"location.reload()\" style=\"padding:12px 24px;background:#475569;color:#fff;border:0;border-radius:8px;font-weight:800;cursor:pointer;font-family:inherit;margin:4px\">🔄 إعادة التحميل</button></div></div>`;}});
+    window.__HOSPITAL_SUPABASE_GATEWAY_READY__=!!window.HospitalCloud;
+    initPasswordEnhancements();const _pwObs=new MutationObserver(ms=>ms.forEach(m=>m.addedNodes.forEach(n=>{if(n.nodeType===1){if(n.matches?.('input[type=\"password\"]'))enhancePasswordInput(n);initPasswordEnhancements(n);}})));_pwObs.observe(document.body,{childList:true,subtree:true});try{init();}catch(e){console.error('Fatal init error:',e);document.body.innerHTML=`<div style="display:grid;place-items:center;min-height:100vh;font-family:Cairo,sans-serif;padding:20px;text-align:center"><div><div style="font-size:48px;margin-bottom:16px">⚠️</div><h1 style="font-size:20px;margin-bottom:8px">خطأ في بدء التشغيل</h1><p style="color:#64748b;margin-bottom:16px">${esc(e.message)}</p><p style=\"color:#64748b;font-size:13px;margin-bottom:12px\">بياناتك لم تُمسح. نزّل نسخة منها أولاً ثم أعد المحاولة.</p><button onclick=\"try{const d=__localStorageDisabled.getItem(STORAGE_KEY)||'';const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([d],{type:'application/json'}));a.download='hospital_raw_backup_'+Date.now()+'.json';a.click();}catch(e){alert('تعذر تنزيل النسخة')}\" style=\"padding:12px 24px;background:#0f766e;color:#fff;border:0;border-radius:8px;font-weight:800;cursor:pointer;font-family:inherit;margin:4px\">⬇️ تنزيل نسخة من البيانات الحالية</button><button onclick=\"location.reload()\" style=\"padding:12px 24px;background:#475569;color:#fff;border:0;border-radius:8px;font-weight:800;cursor:pointer;font-family:inherit;margin:4px\">🔄 إعادة التحميل</button></div></div>`;}});
 setInterval(()=>{try{if(state&&state.currentUser&&state.roomsTab!=='stay'&&document.querySelector('#page-rooms.active')&&!document.querySelector('.overlay')) renderBeds();}catch(e){}},30000);
 
 /* V12-P11 CROSS-SYSTEM RECONCILIATION + CASH-FIRST PAYOUT INTEGRITY */
