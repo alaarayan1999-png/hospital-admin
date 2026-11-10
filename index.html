@@ -2,6 +2,7 @@
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="UTF-8">
+<script src="config.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>مستشفى الـ يوسف — نظام إدارة المستشفيات</title>
 <!-- DB-ONLY: تم تعطيل التخزين المحلي — التشغيل يتطلب بوابة Supabase آمنة -->
@@ -1837,8 +1838,8 @@ input[type="datetime-local"]::-webkit-date-and-time-value,input[type="date"]::-w
 (function (global) {
   'use strict';
   const CONFIG = Object.freeze({
-    supabaseUrl: 'https://pvtwhxqfabukvbzjatgw.supabase.co',
-    publishableKey: 'sb_publishable_lWJmyj2hJUaoVi9f6ROEGw_8PLqr_w9',
+    supabaseUrl: (window.HIS_CONFIG||{}).supabaseUrl||'',
+    publishableKey: (window.HIS_CONFIG||{}).publishableKey||'',
     functionName: 'his-gateway'
   });
   let token = null;
@@ -1877,9 +1878,33 @@ input[type="datetime-local"]::-webkit-date-and-time-value,input[type="date"]::-w
         session_expired: 'انتهت الجلسة. سجّل الدخول مرة أخرى.',
         permission_denied: 'ليس لديك صلاحية لتنفيذ العملية.',
         doctor_rates_update_failed: 'تعذر اعتماد نسب الطبيب على الخادم.',
-        revision_conflict: 'البيانات اتغيرت من جهاز آخر. أعد تحميلها قبل المحاولة.'
+        revision_conflict: 'البيانات اتغيرت من جهاز آخر. أعد تحميلها قبل المحاولة.',
+        not_implemented: 'الميزة دي لسه مش متاحة في نسخة البوابة الأساسية.',
+        weak_password: 'كلمة المرور ضعيفة (8 حروف على الأقل).',
+        balance_due: 'لا يمكن الخروج/إنهاء الإقامة قبل تسوية كل الفواتير.',
+        insufficient_stock: 'الكمية المتاحة الصالحة في الصيدلية أقل من المطلوب.',
+        price_not_set: 'سعر الدواء غير محدد؛ حدده قبل الصرف.',
+        nothing_due: 'لا يوجد مبلغ مستحق على الفاتورة.',
+        patient_active: 'المريض لديه زيارة مفتوحة بالفعل.',
+        patient_not_active: 'المريض ليس لديه زيارة نشطة.',
+        rx_not_open: 'الروشتة مصروفة بالكامل أو ملغاة.',
+        invalid_quantity: 'الكمية أو البيانات المدخلة غير صالحة.',
+        invalid_rates: 'النسب لازم تكون بين 0 و100.',
+        doctor_not_found: 'الطبيب غير موجود.',
+        not_in_stay: 'المريض غير مقيم في غرفة إقامة.',
+        record_not_found: 'السجل غير موجود على الخادم؛ حدّث الصفحة.',
+        duplicate_id: 'السجل موجود بالفعل.',
+        too_many_attempts: 'محاولات دخول كثيرة. انتظر 15 دقيقة وحاول تاني.',
+        invalid_month: 'الشهر غير صالح.',
+        already_approved: 'تم اعتماد مستحقات هذا الشهر مسبقًا.',
+        no_approval: 'لا يوجد اعتماد لهذا الشهر؛ اعتمده أولًا.',
+        no_difference: 'لا يوجد فرق في المستحق.',
+        nothing_to_approve: 'المستحق صفر؛ لا يوجد ما يُعتمد.',
+        exceeds_due: 'المبلغ أكبر من المتبقي من المستحق؛ اكتب سبب التجاوز لو عايز تكمل.',
+        cash_move_failed: 'تعذر تسجيل حركة الخزينة؛ لم تتم العملية.',
+        journal_unbalanced: 'القيد المحاسبي غير متزن؛ لم تتم العملية.'
       };
-      const err = new Error(messages[data && data.error] || ('فشل الاتصال بالبوابة: ' + (data && data.error || response.status)));
+      const err = new Error(messages[data && data.error] || (data && data.message) || ('فشل الاتصال بالبوابة: ' + (data && data.error || response.status)));
       err.status = response.status;
       err.code = data && data.error;
       err.details = data;
@@ -6756,6 +6781,104 @@ setInterval(()=>{try{if(state&&state.currentUser&&state.roomsTab!=='stay'&&docum
  ['input','change','focusin','focusout'].forEach(ev=>document.addEventListener(ev,e=>{const t=e.target;if(t&&t.matches&&t.matches(SEL)){if(!t._dtx) enhance(t);else paint(t);}},true));
  new MutationObserver(m=>{m.forEach(r=>r.addedNodes.forEach(scan));}).observe(document.documentElement,{childList:true,subtree:true});
  scan(document.body);
+})();
+</script>
+<script>
+/* ===== LIVE-SYNC: تحديث لحظي بين كل الأجهزة (Supabase Realtime Broadcast) =====
+   الفكرة: أي جهاز يحفظ تغيير ← يبعت "جرس" فيه رقم الإصدار فقط (من غير أي بيانات مرضى).
+   باقي الأجهزة تسمع الجرس ← تحمّل البيانات من البوابة الآمنة وتعيد الرسم.
+   لو الإنترنت/الجرس وقع: الفحص القديم كل 20 ثانية بيكمل الشغل. */
+(function(){
+'use strict';
+var CFG=window.HIS_CONFIG||{};
+var SB_URL=CFG.supabaseUrl||'';
+var SB_KEY=CFG.publishableKey||'';
+var CHANNEL='his-live-sync';
+var LIB='https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js';
+var client=null,channel=null,connected=false,lastRev=null,applying=false,pending=false,hinted=false,badge=null,lastHealth=0;
+function log(){try{console.log.apply(console,['[live]'].concat([].slice.call(arguments)));}catch(e){}}
+function authed(){return !!(window.HospitalCloud&&window._cloudBootstrapped&&HospitalCloud.status().authenticated);}
+function rev(){return Number((HospitalCloud.status()||{}).revision||0);}
+
+function ensureBadge(){
+  if(badge&&badge.isConnected)return badge;
+  badge=document.createElement('div');
+  badge.style.cssText='position:fixed;bottom:12px;left:12px;z-index:9999;font:700 11px Cairo,sans-serif;padding:5px 10px;border-radius:20px;background:#0f172a;color:#fff;opacity:.85;pointer-events:none';
+  document.body.appendChild(badge);return badge;
+}
+function paintBadge(){
+  if(!authed()){if(badge)badge.style.display='none';return;}
+  var b=ensureBadge();b.style.display='block';
+  b.textContent=connected?'⚡ مزامنة لحظية':'⏳ مزامنة احتياطية (ثانيتين)';
+  b.style.background=connected?'#0f766e':'#b45309';
+}
+function loadLib(cb){
+  if(window.supabase&&window.supabase.createClient)return cb();
+  var s=document.createElement('script');s.src=LIB;s.onload=cb;
+  s.onerror=function(){log('تعذر تحميل مكتبة Supabase — هنكمل بالفحص كل 20 ثانية');};
+  document.head.appendChild(s);
+}
+function connect(){
+  if(channel||!SB_URL||!(window.supabase&&window.supabase.createClient))return;
+  client=window.supabase.createClient(SB_URL,SB_KEY,{realtime:{params:{eventsPerSecond:5}}});
+  channel=client.channel(CHANNEL,{config:{broadcast:{self:false}}});
+  channel.on('broadcast',{event:'changed'},function(m){
+    var r=Number(m&&m.payload&&m.payload.revision||0);
+    if(authed()&&r>rev()){pending=true;tryApply();}
+  }).subscribe(function(st){connected=(st==='SUBSCRIBED');log('status:',st);paintBadge();});
+}
+function disconnect(){
+  try{if(client&&channel)client.removeChannel(channel);}catch(e){}
+  channel=null;client=null;connected=false;lastRev=null;pending=false;paintBadge();
+}
+function keepFocus(){
+  var a=document.activeElement,o=null;
+  if(a&&a.id&&/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)){
+    o={id:a.id,s:a.selectionStart,e:a.selectionEnd};
+  }
+  return o;
+}
+function restoreFocus(o){
+  if(!o)return;
+  try{var n=document.getElementById(o.id);
+    if(n&&n!==document.activeElement){n.focus();if(o.s!=null&&n.setSelectionRange)n.setSelectionRange(o.s,o.e);}
+  }catch(e){}
+}
+async function tryApply(){
+  if(applying||!pending||!authed())return;
+  if(window._cloudWritePending)return;   /* حفظي أنا شغال — هنطبق بعده فورًا */
+  applying=true;
+  try{
+    await cloudReloadCanonicalState();
+    window._cloudRemoteChanged=false;window._cloudRemoteChangeWarned=false;_saveBlocked=false;
+    pending=false;hinted=false;lastRev=rev();
+    var fo=keepFocus();renderAll();restoreFocus(fo);
+    try{setCloudMonitor('ok','متصل لحظيًا · إصدار '+rev(),false);}catch(e){}
+    try{toast('🔄 اتحدثت البيانات من جهاز آخر','success');}catch(e){}
+  }catch(e){log('apply failed',e);}
+  finally{applying=false;}
+}
+setInterval(function(){
+  try{
+    if(!authed()){if(channel)disconnect();else paintBadge();return;}
+    if(!channel)connect();
+    var r=rev();
+    if(lastRev===null){lastRev=r;paintBadge();return;}
+    if(r>lastRev&&!applying){            /* أنا اللي غيّرت → ابعت الجرس */
+      lastRev=r;
+      if(connected&&channel)channel.send({type:'broadcast',event:'changed',payload:{revision:r}});
+    }
+    var now=Date.now();
+    if(now-lastHealth>(connected?10000:2000)&&!applying){   /* شبكة أمان: فحص سريع حتى لو الجرس وقع */
+      lastHealth=now;
+      HospitalCloud.healthCheck().then(function(h){if(Number(h&&h.revision||0)>rev())pending=true;}).catch(function(){});
+    }
+    if(window._cloudRemoteChanged)pending=true;   /* احتياطي: الفحص القديم اكتشف تغيير */
+    if(pending)tryApply();
+    paintBadge();
+  }catch(e){log(e);}
+},200);
+loadLib(function(){log('المكتبة جاهزة');});
 })();
 </script>
 </body>
