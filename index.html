@@ -6790,7 +6790,7 @@ setInterval(()=>{try{if(state&&state.currentUser&&state.roomsTab!=='stay'&&docum
 /* ===== LIVE-SYNC: تحديث لحظي بين كل الأجهزة (Supabase Realtime Broadcast) =====
    الفكرة: أي جهاز يحفظ تغيير ← يبعت "جرس" فيه رقم الإصدار فقط (من غير أي بيانات مرضى).
    باقي الأجهزة تسمع الجرس ← تحمّل البيانات من البوابة الآمنة وتعيد الرسم.
-   لو الإنترنت/الجرس وقع: الفحص القديم كل 20 ثانية بيكمل الشغل. */
+   إشعار الخادم هو المسار الأساسي؛ والفحص الاحتياطي يعمل كل 20 ثانية عند الاتصال أو كل ثانيتين عند الانقطاع. */
 (function(){
 'use strict';
 var CFG=window.HIS_CONFIG||{};
@@ -6826,8 +6826,10 @@ function connect(){
   client=window.supabase.createClient(SB_URL,SB_KEY,{realtime:{params:{eventsPerSecond:5}}});
   channel=client.channel(CHANNEL,{config:{broadcast:{self:false}}});
   channel.on('broadcast',{event:'changed'},function(m){
-    var r=Number(m&&m.payload&&m.payload.revision||0);
-    if(authed()&&r>rev()){pending=true;tryApply();}
+    /* الخادم يرسل إشعارًا بعد اعتماد التغيير في قاعدة البيانات.
+       لا نعتمد على مقارنة revision محلية؛ بعض العمليات (مثل المستخدمين)
+       تغيّر جداول مستقلة ولا ترفع revision الخاص بـ his_state. */
+    if(authed()){pending=true;tryApply();}
   }).subscribe(function(st){connected=(st==='SUBSCRIBED');log('status:',st);paintBadge();});
 }
 function disconnect(){
